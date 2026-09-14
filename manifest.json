@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "t480.hotkey-hints",
+  "name": "Hotkey Hints",
+  "version": "1.1.0",
+  "author": "t480",
+  "license": "MIT",
+  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it \u2014 then add more modifiers to drill in. Esc or release closes.",
+  "kinds": [
+    "panel",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Overlay.qml",
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Hotkey Hints",
+    "description": "Settings for the hold-a-modifier hotkey overlay (the overlay itself has no bar popup \u2014 it only appears while a modifier is held).",
+    "category": "Info",
+    "aliases": [
+      "hotkey-hints",
+      "keybinds",
+      "cheatsheet",
+      "which-key"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "fontFamily": "",
+      "fontSize": 13,
+      "padding": 10,
+      "position": "center",
+      "opacity": 0.97,
+      "maxDirect": 6
+    },
+    "schema": [
+      {
+        "key": "fontFamily",
+        "type": "string",
+        "label": "Font family",
+        "defaultValue": "",
+        "description": "Leave empty to use the bar's own theme font."
+      },
+      {
+        "key": "fontSize",
+        "type": "integer",
+        "label": "Font size",
+        "defaultValue": 13,
+        "min": 9,
+        "max": 28,
+        "step": 1
+      },
+      {
+        "key": "padding",
+        "type": "integer",
+        "label": "Overlay padding",
+        "defaultValue": 10,
+        "min": 4,
+        "max": 48,
+        "step": 2
+      },
+      {
+        "key": "position",
+        "type": "enum",
+        "label": "Position",
+        "options": [
+          "top",
+          "center",
+          "bottom"
+        ],
+        "defaultValue": "center"
+      },
+      {
+        "key": "opacity",
+        "type": "number",
+        "label": "Opacity",
+        "defaultValue": 0.97,
+        "min": 0.3,
+        "max": 1,
+        "step": 0.01
+      },
+      {
+        "key": "maxDirect",
+        "type": "integer",
+        "label": "Direct combos shown per level",
+        "defaultValue": 6,
+        "min": 2,
+        "max": 24,
+        "step": 1,
+        "description": "How many completed hotkeys are listed at once. Keep low so the overlay never covers more than a sliver of the screen; extras collapse into a '+N more' chip."
+      }
+    ]
+  }
+}

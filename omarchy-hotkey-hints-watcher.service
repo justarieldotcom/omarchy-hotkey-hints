@@ -1,0 +1,12 @@
+[Unit]
+Description=Omarchy hotkey-hints modifier key watcher
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/home/t480/.config/omarchy/plugins/t480.hotkey-hints/hotkey-watcher.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
