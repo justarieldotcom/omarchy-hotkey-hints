@@ -188,6 +188,45 @@ Requirements: `python-evdev` (system package), and root for `/dev/input`.
   without grabbing is enough and models the keyboard-compositor split per
   Omarchy's layering.
 
+## Fixed: settings popup opened once, then never again (2026-09-15)
+
+Symptom: click the bar icon, the settings popup opens fine; click anywhere
+outside it to dismiss (the normal way to close it); click the bar icon
+again — nothing happens, ever again, with no error anywhere (IPC
+`open`/`toggle`/`show` to `t480.hotkey-hints.settings` all report success,
+but no `omarchy-keyboard-panel` layer ever maps — checked with `hyprctl
+layers`).
+
+Root cause: `Widget.qml`'s `KeyboardPanel { id: popup }` bound its own
+`open` to the outer widget's state one-way (`open: root.opened`) but never
+set `owner: root`. Base `KeyboardPanel.qml`'s outside-click dismissal calls
+its own `close()`, which — with no `owner` — falls back to directly
+assigning `root.open = false` on itself (base component, not this plugin).
+In QML, assigning a value to a property that already has a live binding
+**permanently destroys that binding** (this is standard, documented Qt
+behavior — see https://doc.qt.io/qt-6/qtqml-syntax-propertybinding.html).
+After that one dismiss, `popup.open` is a disconnected dead value; nothing
+Widget.qml or the outer bar icon does can ever flip it again. This is a
+named, known Omarchy plugin footgun — see the upstream plugin-dev docs'
+"A Panel Opens Once but Not Again" troubleshooting entry
+(https://plugins.omarchy.org/develop.html).
+
+Fix: add `owner: root` to the `KeyboardPanel` block, matching every other
+`KeyboardPanel` usage in this shell (first-party `omarchy.audio` /
+`omarchy.bluetooth` / `omarchy.network`, and sibling plugins `t480.agents`,
+`t480.control-station`, `green-room`) — all of them set this and none of
+them have ever hit this bug. Also deleted the unused `hostWidget` property
+and its dead guard in `persistSettings()`: it was inert scaffolding toward
+the upstream docs' `Loader`-based `BarWidget.qml` + `Panel.qml` split
+pattern (where `hostWidget` gets wired via `injectPanel()`), which this
+plugin doesn't use — it's a single-file `Panel` like every sibling above,
+where `owner: root` alone is complete and correct.
+
+If a similar "works once, dead after" symptom ever shows up on
+`Overlay.qml` or a future panel, check for a raw property assignment
+happening on a bound property first — enable Qt's own diagnostic for it:
+`quickshell --log-rules "qt.qml.binding.removal=true"`.
+
 ## Testing scaffold (for future work)
 
 - `/tmp/opencode/modtest.py` — synthetic keyboard sequence (5 s hold, tap,

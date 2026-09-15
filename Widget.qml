@@ -15,7 +15,6 @@ Panel {
   ipcTarget: "t480.hotkey-hints.settings"
   manageIpc: true
 
-  property var hostWidget: null
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -47,7 +46,6 @@ Panel {
     for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
     for (var key in values) entry[key] = values[key]
     root.settings = entry
-    if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
@@ -123,6 +121,14 @@ Panel {
     id: popup
     anchorItem: button
     bar: root.bar
+    // Without an owner, KeyboardPanel's own outside-click dismissal falls
+    // back to directly assigning its `open` property (base KeyboardPanel.qml
+    // close()), which permanently destroys the `open: root.opened` binding
+    // below — the panel then never opens again after the first dismiss.
+    // Matches every sibling KeyboardPanel usage in this shell (omarchy.audio,
+    // omarchy.bluetooth, t480.agents, etc.) and is the fix for the upstream
+    // Omarchy plugin-dev docs' "A Panel Opens Once but Not Again" gotcha.
+    owner: root
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: popup.fittedContentWidth(Style.space(340))
