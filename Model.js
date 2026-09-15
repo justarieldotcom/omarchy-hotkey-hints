@@ -93,7 +93,8 @@ function groupKeybindings(text) {
 //                grouped by that next modifier: held [SUPER]  ->  "+ Ctrl (12)".
 // Only bindings whose modifier SET is a superset of the held set are
 // reachable; bindings that don't include every held modifier are ignored.
-function stepsForHeld(groups, held, maxDirect) {
+function stepsForHeld(groups, held, maxDirect, usageCounts) {
+  usageCounts = usageCounts || {}
   var heldSet = {}
   for (var i = 0; i < held.length; i++) heldSet[held[i]] = true
 
@@ -123,6 +124,12 @@ function stepsForHeld(groups, held, maxDirect) {
   }
 
   direct.sort(function(a, b) {
+    // Most-used combos first when usage tracking is on (usageCounts is {}
+    // otherwise, so ca === cb === 0 always and this is a no-op — identical
+    // to the pre-usage-tracking ordering below).
+    var ca = usageCounts[usageIdentity(a.mods, a.key)] || 0
+    var cb = usageCounts[usageIdentity(b.mods, b.key)] || 0
+    if (ca !== cb) return cb - ca
     // Nudged keys (SPACE, RETURN, ESCAPE …) and letters ahead of bare-digit
     // workspace binds, so the first cap-filled row shows the flagship combos
     // instead of SUPER+0…9.
@@ -155,6 +162,54 @@ function clipDescription(text) {
   if (typeof text !== "string") return ""
   text = text.replace(/\s+/g, " ").trim()
   return text.length > 20 ? text.slice(0, 19).trim() + "…" : text
+}
+
+// Canonical identity for a mods+key combo: mods upper-cased and sorted, key
+// upper-cased, joined "MOD1+MOD2:KEY". Held-modifier order never matters
+// (set semantics, same as stepsForHeld), and `omarchy menu keybindings
+// --print` is inconsistent about key casing (e.g. "Delete" vs "DELETE",
+// "Home" vs "HOME") — upper-casing both sides is what lets usage counts
+// reported by the evdev watcher (which only knows raw key names) line up
+// with bindings parsed from that command's output.
+function usageIdentity(mods, key) {
+  var upper = (mods || []).map(function(m) { return String(m).toUpperCase() }).sort()
+  return upper.join("+") + ":" + String(key || "").toUpperCase()
+}
+
+// Every known binding reduced to its usage identity, sorted and de-duped.
+// This is the list handed off to the watcher (via a small JSON file) so it
+// can tell a real, bound hotkey apart from ordinary typing before ever
+// reporting a keypress — it must never report a key that isn't in this set.
+function flattenBindingIdentities(groups) {
+  var out = []
+  for (var i = 0; i < LEADING_MODS.length; i++) {
+    var list = groups[LEADING_MODS[i]] || []
+    for (var j = 0; j < list.length; j++) out.push(usageIdentity(list[j].mods, list[j].key))
+  }
+  out.sort()
+  var deduped = []
+  for (var k = 0; k < out.length; k++) {
+    if (k === 0 || out[k] !== out[k - 1]) deduped.push(out[k])
+  }
+  return deduped
+}
+
+// Defensive parse of the persisted usage-counts file: a flat map of
+// usageIdentity() -> positive integer count. Anything malformed collapses to
+// {} (or drops just the bad entry) rather than throwing — a corrupt file
+// should just mean "no usage history yet", never break the overlay.
+function parseUsageCounts(text) {
+  var out = {}
+  try {
+    var parsed = JSON.parse(text || "{}")
+    if (parsed && typeof parsed === "object") {
+      for (var key in parsed) {
+        var n = parseInt(parsed[key], 10)
+        if (n > 0) out[key] = n
+      }
+    }
+  } catch (e) {}
+  return out
 }
 
 // Reads this plugin's own persisted inline settings out of a parsed
@@ -234,6 +289,30 @@ function selfCheck() {
     "pickBarEntrySettings should return this plugin's own fields, minus id")
   console.assert(Object.keys(pickBarEntrySettings(cfg, "missing.plugin")).length === 0,
     "pickBarEntrySettings should return {} when the entry isn't in the bar layout")
+
+  // ---- usage tracking: identity format, mod-order/case independence
+  console.assert(usageIdentity(["SUPER", "CTRL"], "v") === "CTRL+SUPER:V",
+    "usageIdentity should sort mods and upper-case both sides, got " + usageIdentity(["SUPER", "CTRL"], "v"))
+  console.assert(usageIdentity(["ctrl", "super"], "V") === usageIdentity(["SUPER", "CTRL"], "v"),
+    "usageIdentity should be independent of mod order and input casing")
+
+  var identities = flattenBindingIdentities(g)
+  console.assert(identities.indexOf("SUPER:K") >= 0, "flattenBindingIdentities should include SUPER:K, got " + JSON.stringify(identities))
+  console.assert(identities.indexOf("ALT+SHIFT+SUPER:B") >= 0,
+    "flattenBindingIdentities should include the 3-mod Browser (private) bind, got " + JSON.stringify(identities))
+
+  console.assert(JSON.stringify(parseUsageCounts("not json")) === "{}", "parseUsageCounts should tolerate malformed JSON")
+  console.assert(JSON.stringify(parseUsageCounts('{"SUPER:K": 3, "SUPER:V": 0, "SUPER:X": -1, "SUPER:Z": "nope"}')) === '{"SUPER:K":3}',
+    "parseUsageCounts should keep only positive integer counts, got " + JSON.stringify(parseUsageCounts('{"SUPER:K": 3, "SUPER:V": 0, "SUPER:X": -1, "SUPER:Z": "nope"}')))
+
+  // held = [SUPER] with usage favoring V (SUPER+V is otherwise alphabetically
+  // after K): usage count should override the alnum tiebreaker.
+  var withUsage = stepsForHeld(g, ["SUPER"], 8, { "SUPER:K": 1, "SUPER:B": 0 })
+  console.assert(withUsage.direct[0].key === "K", "usage-tracked ordering should put the used combo first, got " + JSON.stringify(withUsage.direct))
+  // Passing no usageCounts (or {}) must reproduce the exact pre-usage ordering.
+  var withoutUsage = stepsForHeld(g, ["SUPER"], 8)
+  console.assert(JSON.stringify(withoutUsage) === JSON.stringify(l1),
+    "omitting usageCounts should be identical to the original stepsForHeld result")
 
   return true
 }

@@ -70,6 +70,79 @@ Verification (synthetic uinput keyboard, live shell state sampling):
 | Super_L then Super_R | ~52 ms after both up | no premature release |
 | Ctrl tap < 280 ms | never opened | debounce works |
 
+## Usage tracking: expanding the watcher's read scope without it becoming a keylogger
+
+Feature: an opt-in `rememberUsage` setting that reorders each level's chips
+by how often the user actually presses that combo. The hard part wasn't the
+ordering (that's a one-line comparator change in `Model.js`) — it was that
+literally nothing in this plugin had ever observed a *completed* hotkey
+before. `Overlay.qml` is deliberately keyboard-focus-free (see the top-level
+architecture note); the only thing that ever reads raw keys is the root
+watcher, and until now it only read the 8 modifier keycodes.
+
+Options considered:
+- **Compositor signal for "a bind fired"** — ruled out again, same as the
+  release-detection investigation above: no such event exists on Hyprland's
+  IPC socket.
+- **Branch drill-path proxy** (count which modifier branch the user adds
+  while the overlay is open, entirely inside `Overlay.qml`, no watcher
+  changes) — simple and required zero new privilege, but only reorders
+  modifier-branch chips, not the leaf hotkey chips, and misses every combo
+  the user already knows by muscle memory (overlay never opens for those).
+  Rejected as too weak a signal for what was actually asked.
+- **Real completed-hotkey tracking** (chosen): extend the watcher to also
+  watch non-modifier keydowns while a modifier is held.
+
+The risk with the chosen option is obvious: a root service reading
+*all* keys, not just modifiers, is a meaningfully bigger privilege surface —
+in the worst case, a keylogger. The mitigation is a strict match-before-report
+split:
+- `Overlay.qml` writes every known binding (from the same
+  `omarchy menu keybindings --print` parse used for the hints themselves) to
+  `~/.local/state/omarchy/hotkey-hints-bindings.json` as a flat list of
+  `Model.usageIdentity()` strings.
+- The watcher loads that file (poll-on-keydown, mtime-checked, same
+  no-inotify style as the rest of the file) into an in-memory set.
+- A non-modifier keydown while a modifier is held is looked up in that set
+  **before** anything happens. No match → nothing happens: no subprocess, no
+  IPC call, no write, no log line. Only a match spawns
+  `omarchy-shell -q t480.hotkey-hints used <identity>` — the exact same
+  `subprocess.run` shape the existing press/release calls already use, so it
+  doesn't change the watcher's process-spawn profile in kind, only rate (and
+  only for real hotkey presses, which are inherently infrequent).
+- What's reported is only the mods+key identity string (e.g. `SUPER:K`) —
+  never which window/app had focus, never timing, never anything for a key
+  that didn't match a real bind.
+
+Autorepeat handling: evdev's `EV_KEY` value is `0`=up, `1`=down, `2`=repeat.
+The original code collapsed 1 and 2 into a single `pressed=True` (harmless
+for modifiers, since the `down` set already dedupes). Usage tracking can't
+tolerate that collapse — holding `SUPER+K` would otherwise spam a `used` IPC
+call at the keyboard's repeat rate — so `on_key()` now takes the raw evdev
+value and returns immediately on `2`.
+
+Key-name mapping: evdev's own keycode names (`KEY_K`, `KEY_9`, `KEY_F9`, …)
+already match the key-name strings `omarchy menu keybindings --print` uses
+for plain letters/digits/F-keys, generated once at import time from
+`evdev.ecodes.keys`. A short explicit table (`KEY_NAMES` in
+`hotkey-watcher.py`) covers the handful of keys where the two naming schemes
+diverge (`KEY_ENTER`→`RETURN`, `KEY_ESC`→`ESCAPE`, `KEY_DOT`→`PERIOD`,
+`KEY_LEFTBRACE`→`BRACKETLEFT`, `KEY_SYSRQ`→`PRINT`, the `XF86Audio*`/
+`XF86Kbd*`/`XF86Mon*` media keys) — verified against a real
+`omarchy menu keybindings --print` dump on this machine, not guessed. A key
+that isn't in the table is simply never reported — safe degradation (the
+combo just never gets to float to the top), matching this file's existing
+best-effort philosophy. `omarchy menu keybindings --print`'s own key-name
+casing is inconsistent (`Delete` vs `DELETE`, `Home` vs `HOME`); both sides
+of the match upper-case via `Model.usageIdentity()` / the equivalent join in
+the watcher, so this doesn't cause false negatives.
+
+Known limitation, accepted rather than solved: mouse-button binds (e.g.
+`SUPER + LEFT MOUSE BUTTON`) are structurally untrackable here, since
+`is_keyboard()` only opens devices with a `KEY_A` capability — mice are never
+opened at all, so their button events never reach `on_key()`. Usage tracking
+only ever applies to keyboard-originated combos.
+
 ## Architecture / files
 
 - `Overlay.qml` — the overlay (panel plugin). Only reacts to IPC calls

@@ -30,6 +30,14 @@ import "Model.js" as Model
 // instantly via the plugin's own evdev watcher, which bypasses Hyprland's
 // broken bindr); a stuckGuard timer is kept as insurance in case the watcher
 // stops unexpectedly.
+//
+// Usage tracking (opt-in via the `rememberUsage` setting): this file writes
+// the flattened set of known bindings to bindingsFile on every keybindings
+// refresh; the watcher matches real keypresses against that file and, only
+// for a match, calls the `used` IPC below. That match-before-report split is
+// what lets the watcher read regular keys (not just modifiers) without
+// becoming a keylogger — anything that isn't an actual bound hotkey never
+// leaves the watcher process.
 Item {
   id: root
 
@@ -77,6 +85,32 @@ Item {
   readonly property int maxDirect: {
     var v = parseInt(rawSettings.maxDirect, 10)
     return (v >= 2 && v <= 24) ? v : 6
+  }
+  readonly property bool rememberUsage: rawSettings.rememberUsage === true || rawSettings.rememberUsage === "true"
+
+  // ------------------------------------------------------------- usage tracking
+  // Map of Model.usageIdentity() -> press count, persisted to usageFile.
+  // Populated only by the watcher's `used` IPC call (which itself only fires
+  // for keys matching a binding in bindingsFile — see hotkey-watcher.py), so
+  // this never contains anything but real, bound hotkey combos.
+  property var usageCounts: ({})
+
+  function bumpUsage(identity) {
+    if (!identity) return
+    var next = {}
+    for (var k in root.usageCounts) next[k] = root.usageCounts[k]
+    next[identity] = (next[identity] || 0) + 1
+    root.usageCounts = next
+    usageFile.setText(JSON.stringify(root.usageCounts, null, 2) + "\n")
+  }
+
+  function resetUsage() {
+    root.usageCounts = {}
+    usageFile.setText("{}\n")
+  }
+
+  function writeKnownBindings() {
+    bindingsFile.setText(JSON.stringify(Model.flattenBindingIdentities(root.hintGroups), null, 2) + "\n")
   }
 
   // --------------------------------------------------------------- geometry
@@ -188,11 +222,14 @@ Item {
   }
 
   function recomputeSteps() {
-    root.stepView = Model.stepsForHeld(root.hintGroups, root.held, root.maxDirect)
+    root.stepView = Model.stepsForHeld(root.hintGroups, root.held, root.maxDirect,
+      root.rememberUsage ? root.usageCounts : ({}))
   }
 
   onHeldChanged: recomputeSteps()
   onMaxDirectChanged: recomputeSteps()
+  onRememberUsageChanged: recomputeSteps()
+  onUsageCountsChanged: recomputeSteps()
 
   // --------------------------------------------------------------- timers
   Timer {
@@ -244,9 +281,36 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.hintGroups = Model.groupKeybindings(text)
+        root.writeKnownBindings()
         root.recomputeSteps()
       }
     }
+  }
+
+  // Usage counts (Model.usageIdentity() -> press count), bumped only via the
+  // `used` IPC call below. Lives under ~/.local/state/omarchy like the
+  // built-in clipboard plugin's history file.
+  FileView {
+    id: usageFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-usage.json"
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.usageCounts = Model.parseUsageCounts(text())
+    onLoadFailed: root.usageCounts = ({})
+  }
+
+  // The flattened set of every known binding's usage identity, written
+  // whenever hintGroups is (re)computed. hotkey-watcher.py reads this to
+  // decide whether a keypress is a real, bound hotkey before ever reporting
+  // it — this file is the only thing that keeps the root watcher from acting
+  // on ordinary typing.
+  FileView {
+    id: bindingsFile
+    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-bindings.json"
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
   }
 
   // Settings live in the bar entry's inline shell.json config (edited via
@@ -268,11 +332,22 @@ Item {
     function dismiss(): string { root.dismiss(); return "ok" }
     function state(): string { return root.opened ? "open" : "closed" }
     function ping(): string { return "ok" }
+    // Called only by hotkey-watcher.py, and only for an `identity` it already
+    // matched against bindingsFile — so this never records anything but a
+    // real, currently-bound hotkey combo. A no-op while the setting is off,
+    // so flipping it back on later doesn't need to "catch up" on anything
+    // missed (nothing was missed — it's just not recorded until enabled).
+    function used(identity: string): string {
+      if (root.rememberUsage) root.bumpUsage(identity)
+      return "ok"
+    }
+    function resetUsage(): string { root.resetUsage(); return "ok" }
   }
 
   Component.onCompleted: {
     fetchKeybindings()
     shellConfigFile.reload()
+    usageFile.reload()
   }
 
   // A card-sized layer surface. Anchored top-left with pixel margins so it

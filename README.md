@@ -23,7 +23,9 @@ and keep typing in whatever app you're in — it never takes the keyboard.
   never fire, causing a multi-second phantom delay on every close. The watcher
   emits exactly one press on first key-down and one release on last key-up of
   each canonical modifier (Super_L/R → `SUPER`, etc.), so double-taps and
-  mixed chords resolve correctly.
+  mixed chords resolve correctly. It also (opt-in — see below) watches for a
+  completed hotkey combo, matching it in-process against the known bindings
+  list before ever reporting it, so it never becomes a general keylogger.
 - **`Widget.qml`** (`kind: bar-widget`) — a small bar icon whose only job is
   to host **Settings** (font family/size, padding, position, opacity, and the
   `maxDirect` cap). This Omarchy shell only gives third-party plugins
@@ -86,6 +88,32 @@ The card says inside ~10% of the screen height by keeping only the top
 `maxDirect` (default 6) direct combos on screen, truncating descriptions to
 ~20 characters, and collapsing the rest into a `+N more` chip. Raise
 `maxDirect` from the settings popup if you want more combos listed at once.
+
+## Remember most-used hotkeys (opt-in)
+
+Off by default. Turn it on from the settings popup (**Remember most-used
+hotkeys**) to sort each level's chips by how often you actually press that
+combo, most-used first — combined with `maxDirect`, your most-used hotkeys
+are what stay on screen and rarely-used ones are what fall into `+N more`.
+
+How it's measured: `hotkey-watcher.py` (the same root evdev service that
+detects modifier release) also watches for a non-modifier key going down
+while a modifier is held — i.e. a completed combo, whether or not the
+overlay was even open at the time (so a combo you already know by muscle
+memory still counts). It's matched against the *current* keybindings list
+(which `Overlay.qml` writes out to
+`~/.local/state/omarchy/hotkey-hints-bindings.json` every time it refreshes)
+**before** anything is reported. Only a match is ever reported — ordinary
+typing, an app's own Ctrl+C, or any unbound combo never leaves the watcher
+process: no IPC call, no log line, nothing written anywhere. What is reported
+is just the mods+key identity (e.g. `SUPER:K`), counted in
+`~/.local/state/omarchy/hotkey-hints-usage.json` — never timing, never
+window/app context, never anything about the key that wasn't a known bind.
+
+Turning the setting off stops using the counts (chips revert to the
+alphabetical/shortest-first order) but keeps them on disk, so turning it back
+on later doesn't need to "relearn" anything. **Reset usage stats** in the
+settings popup clears the file.
 
 ## Verifying changes here
 

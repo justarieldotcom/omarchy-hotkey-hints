@@ -32,7 +32,8 @@
       "padding": 10,
       "position": "center",
       "opacity": 0.97,
-      "maxDirect": 6
+      "maxDirect": 6,
+      "rememberUsage": false
     },
     "schema": [
       {
@@ -89,6 +90,13 @@
         "max": 24,
         "step": 1,
         "description": "How many completed hotkeys are listed at once. Keep low so the overlay never covers more than a sliver of the screen; extras collapse into a '+N more' chip."
+      },
+      {
+        "key": "rememberUsage",
+        "type": "boolean",
+        "label": "Remember most-used hotkeys",
+        "defaultValue": false,
+        "description": "Sort each level's hotkey chips by how often you actually press them, most-used first. Only real, currently-bound combos you press are ever counted (never ordinary typing or app shortcuts); counts are stored locally in ~/.local/state/omarchy/hotkey-hints-usage.json. Turning this off keeps the counts but stops using them; use Reset to clear them."
       }
     ]
   }
