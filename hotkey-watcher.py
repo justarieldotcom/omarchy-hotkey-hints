@@ -1,27 +1,16 @@
-#!/usr/bin/env python3
-# Watches the physical modifier keys via evdev and mirrors every press/release
-# into the t480.hotkey-hints plugin IPC. Hyprland's bindr release binds for bare
-# modifier keys never fire (libinput-based compositors lose the held-key state),
-# so the shell watches the kernel instead of trusting the session. Run as root
-# (systemd service) since /dev/input is root-readable. Only reads devices, never
-# grabs, so it steals no input. Keycodes below are raw evdev codes (pre-xkb);
-# the standard modifier keys map 1:1 regardless of keyboard layout.
-#
-# Usage tracking (opt-in, see the plugin's `rememberUsage` setting): this also
-# watches for a non-modifier key going down while a modifier is held, i.e. a
-# completed hotkey combo. It is matched in-process against KNOWN_BINDINGS
-# (loaded from bindings_path, written by Overlay.qml from the live keybindings
-# list) BEFORE anything is reported — an unmatched key (ordinary typing, an
-# app's own Ctrl+C, an unbound combo) never leaves this process: no IPC call,
-# no log line, nothing written anywhere. Only a keypress that matches an
-# actual, currently-bound hotkey ever results in a `used` IPC call, and even
-# then only the mods+key identity is sent — never timing, never content.
+#!/usr/bin/python3 -I
+# Root-owned helper (installed to /usr/local/libexec/omarchy-hotkey-hints/).
+# Opens /dev/input as root, then seteuid(--uid) for IPC and state I/O.
+# Default: modifier keys only. Non-modifier keydowns are inspected only when
+# the user has opted into rememberUsage via watch.json.
+import argparse
 import glob
 import json
 import os
 import pwd
 import select
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -29,8 +18,14 @@ import time
 import evdev
 from evdev import ecodes
 
-# Canonical modifier per physical evdev keycode. emit release only when both
-# sides of a modifier are up, so Super_L held + Super_R tapped resolves right.
+PLUGIN_ID = "io.github.mikus2604.hotkey-hints"
+OMARCHY_PATH = "/usr/share/omarchy"
+SCAN_INTERVAL = 2
+MAX_BINDINGS = 4096
+MAX_BIND_LEN = 96
+MAX_STATE_BYTES = 65536
+TELL_TIMEOUT = 5
+
 MODS = {
     ecodes.KEY_LEFTMETA: "SUPER",
     ecodes.KEY_RIGHTMETA: "SUPER",
@@ -42,13 +37,6 @@ MODS = {
     ecodes.KEY_RIGHTSHIFT: "SHIFT",
 }
 
-# Non-modifier evdev keycode -> the key-name string `omarchy menu keybindings
-# --print` uses for it (verified against a live keybindings dump). Letters and
-# digits are handled generically below (evdev's own "KEY_X" name already
-# matches); everything here is a case where the two names diverge, plus the
-# common XF86 media keys. A key that isn't in this table (or isn't in
-# KNOWN_BINDINGS once mapped) is simply never reported — best-effort by
-# design, matching this watcher's existing minimal/read-only philosophy.
 KEY_NAMES = {
     ecodes.KEY_ENTER: "RETURN",
     ecodes.KEY_KPENTER: "RETURN",
@@ -57,92 +45,230 @@ KEY_NAMES = {
     ecodes.KEY_RIGHTBRACE: "BRACKETRIGHT",
     ecodes.KEY_DOT: "PERIOD",
     ecodes.KEY_SYSRQ: "PRINT",
-    ecodes.KEY_MUTE: "XF86AudioMute",
-    ecodes.KEY_VOLUMEDOWN: "XF86AudioLowerVolume",
-    ecodes.KEY_VOLUMEUP: "XF86AudioRaiseVolume",
-    ecodes.KEY_PLAYPAUSE: "XF86AudioPlay",
-    ecodes.KEY_NEXTSONG: "XF86AudioNext",
-    ecodes.KEY_PREVIOUSSONG: "XF86AudioPrev",
-    ecodes.KEY_MICMUTE: "XF86AudioMicMute",
-    ecodes.KEY_EJECTCD: "XF86Eject",
-    ecodes.KEY_CALC: "XF86Calculator",
-    ecodes.KEY_POWER: "XF86PowerOff",
-    ecodes.KEY_BRIGHTNESSDOWN: "XF86MonBrightnessDown",
-    ecodes.KEY_BRIGHTNESSUP: "XF86MonBrightnessUp",
-    ecodes.KEY_KBDILLUMDOWN: "XF86KbdBrightnessDown",
-    ecodes.KEY_KBDILLUMUP: "XF86KbdBrightnessUp",
-    ecodes.KEY_KBDILLUMTOGGLE: "XF86KbdLightOnOff",
+    ecodes.KEY_MUTE: "XF86AUDIOMUTE",
+    ecodes.KEY_VOLUMEDOWN: "XF86AUDIOLOWERVOLUME",
+    ecodes.KEY_VOLUMEUP: "XF86AUDIORAISEVOLUME",
+    ecodes.KEY_PLAYPAUSE: "XF86AUDIOPLAY",
+    ecodes.KEY_NEXTSONG: "XF86AUDIONEXT",
+    ecodes.KEY_PREVIOUSSONG: "XF86AUDIOPREV",
+    ecodes.KEY_MICMUTE: "XF86AUDIOMICMUTE",
+    ecodes.KEY_EJECTCD: "XF86EJECT",
+    ecodes.KEY_CALC: "XF86CALCULATOR",
+    ecodes.KEY_POWER: "XF86POWEROFF",
+    ecodes.KEY_BRIGHTNESSDOWN: "XF86MONBRIGHTNESSDOWN",
+    ecodes.KEY_BRIGHTNESSUP: "XF86MONBRIGHTNESSUP",
+    ecodes.KEY_KBDILLUMDOWN: "XF86KBDBRIGHTNESSDOWN",
+    ecodes.KEY_KBDILLUMUP: "XF86KBDBRIGHTNESSUP",
+    ecodes.KEY_KBDILLUMTOGGLE: "XF86KBDLIGHTONOFF",
 }
-# Plain letters/digits/F-keys: evdev's own name (minus the "KEY_" prefix)
-# already matches (KEY_K -> "K", KEY_9 -> "9", KEY_F9 -> "F9").
 for _code, _name in ecodes.keys.items():
     if _code in KEY_NAMES or _code in MODS:
         continue
     _names = _name if isinstance(_name, (list, tuple)) else [_name]
     for _n in _names:
         if _n.startswith("KEY_") and _n[4:].isalnum():
-            KEY_NAMES[_code] = _n[4:]
+            KEY_NAMES[_code] = _n[4:].upper()
             break
-
-OMARCHY_PATH = "/usr/share/omarchy"
-SCAN_INTERVAL = 2
 
 down = set()
 devices = {}
 stopping = False
 known_bindings = set()
 bindings_mtime = None
+remember_usage = False
+watch_mtime = None
+usage_mtime = None
+usage_counts = {}
+target_uid = 0
+target_gid = 0
+pw_home = ""
 
 
 def session_env():
-    uid = 1000
-    for sock in sorted(glob.glob("/run/user/*/wayland-[0-9]*")):
-        if sock.endswith(".lock"):
-            continue
-        uid = int(sock.split("/")[3])
-        break
     return {
-        "HOME": pwd.getpwuid(uid).pw_dir,
-        "XDG_RUNTIME_DIR": f"/run/user/{uid}",
+        "HOME": pw_home,
+        "USER": pwd.getpwuid(target_uid).pw_name,
+        "XDG_RUNTIME_DIR": "/run/user/%d" % target_uid,
         "OMARCHY_PATH": OMARCHY_PATH,
         "PATH": "/usr/bin:/bin",
+        "LC_ALL": "C",
     }
 
 
-def bindings_path():
-    return os.path.join(session_env()["HOME"], ".local/state/omarchy/hotkey-hints-bindings.json")
+def as_root(fn):
+    os.seteuid(0)
+    try:
+        return fn()
+    finally:
+        os.seteuid(target_uid)
+
+
+def state_dir():
+    return os.path.join(pw_home, ".local", "state", "omarchy", "hotkey-hints")
+
+
+def open_state_file(name):
+    path = os.path.join(state_dir(), name)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != target_uid
+                or st.st_nlink != 1 or st.st_size > MAX_STATE_BYTES):
+            os.close(fd)
+            return None
+        os.set_blocking(fd, True)
+        return fd, st.st_mtime
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_fd(fd):
+    data = b""
+    while len(data) <= MAX_STATE_BYTES:
+        chunk = os.read(fd, min(65536, MAX_STATE_BYTES + 1 - len(data)))
+        if not chunk:
+            break
+        data += chunk
+    if len(data) > MAX_STATE_BYTES:
+        return None
+    return data
 
 
 def load_bindings():
-    # Re-stat (cheap) on every non-modifier keydown rather than on a timer, so
-    # a just-refreshed keybindings list takes effect on the very next press.
     global known_bindings, bindings_mtime
     try:
-        mtime = os.stat(bindings_path()).st_mtime
-    except OSError:
+        fd, mtime = open_state_file("bindings.json")
+    except (TypeError, OSError):
         known_bindings = set()
         bindings_mtime = None
         return
     if mtime == bindings_mtime:
+        os.close(fd)
         return
     try:
-        with open(bindings_path()) as f:
-            data = json.load(f)
-        known_bindings = set(data) if isinstance(data, list) else set()
+        raw = read_fd(fd)
+        data = json.loads(raw.decode("utf-8", "strict")) if raw else []
+        if not isinstance(data, list):
+            raise ValueError("bindings")
+        out = set()
+        for item in data[:MAX_BINDINGS]:
+            if isinstance(item, str) and 0 < len(item) <= MAX_BIND_LEN:
+                out.add(item.upper())
+        known_bindings = out
         bindings_mtime = mtime
-    except (OSError, ValueError):
+    except (ValueError, OSError, UnicodeError):
         known_bindings = set()
         bindings_mtime = None
+    finally:
+        os.close(fd)
 
 
-def tell(value, kind):
-    subprocess.run(["omarchy-shell", "-q", "t480.hotkey-hints", kind, value],
-                   env=session_env())
+def load_watch():
+    global remember_usage, watch_mtime
+    try:
+        fd, mtime = open_state_file("watch.json")
+    except (TypeError, OSError):
+        remember_usage = False
+        watch_mtime = None
+        return
+    if mtime == watch_mtime:
+        os.close(fd)
+        return
+    try:
+        raw = read_fd(fd)
+        data = json.loads(raw.decode("utf-8", "strict")) if raw else {}
+        remember_usage = isinstance(data, dict) and data.get("rememberUsage") is True
+        watch_mtime = mtime
+    except (ValueError, OSError, UnicodeError):
+        remember_usage = False
+        watch_mtime = None
+    finally:
+        os.close(fd)
+
+
+def load_usage():
+    global usage_counts, usage_mtime
+    try:
+        fd, mtime = open_state_file("usage.json")
+    except (TypeError, OSError):
+        usage_counts = {}
+        usage_mtime = None
+        return
+    if mtime == usage_mtime:
+        os.close(fd)
+        return
+    try:
+        raw = read_fd(fd)
+        data = json.loads(raw.decode("utf-8", "strict")) if raw else {}
+        out = {}
+        if isinstance(data, dict):
+            for key, value in list(data.items())[:512]:
+                if not isinstance(key, str):
+                    continue
+                try:
+                    n = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < n <= 1000000:
+                    out[key] = n
+        usage_counts = out
+        usage_mtime = mtime
+    except (ValueError, OSError, UnicodeError):
+        usage_counts = {}
+        usage_mtime = None
+    finally:
+        os.close(fd)
+
+
+def write_usage():
+    directory = state_dir()
+    payload = json.dumps(usage_counts, separators=(",", ":")).encode("utf-8") + b"\n"
+    if len(payload) > MAX_STATE_BYTES:
+        return
+    tmp_name = ".usage.%s.tmp" % os.urandom(8).hex()
+    tmp_path = os.path.join(directory, tmp_name)
+    dest = os.path.join(directory, "usage.json")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+    except OSError:
+        return
+    try:
+        os.fchmod(fd, 0o600)
+        view = memoryview(payload)
+        while view:
+            n = os.write(fd, view)
+            view = view[n:]
+        os.fsync(fd)
+        os.replace(tmp_path, dest)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+
+
+def tell(kind, value):
+    try:
+        subprocess.run(
+            ["/usr/bin/omarchy-shell", "-q", PLUGIN_ID, kind, value],
+            env=session_env(),
+            timeout=TELL_TIMEOUT,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def on_key(code, value):
-    if value == 2:  # autorepeat: irrelevant to both modifier tracking and
-        return       # usage tracking (would otherwise spam `used` on a hold)
+    if value == 2:
+        return
     pressed = value == 1
 
     mod = MODS.get(code)
@@ -153,21 +279,22 @@ def on_key(code, value):
             down.add(code)
             if any(c in down for c, m in MODS.items() if m == mod and c != code):
                 return
-            tell(mod, "press")
+            tell("press", mod)
         else:
             if code not in down:
                 return
             down.discard(code)
             if any(c in down for c, m in MODS.items() if m == mod and c != code):
                 return
-            tell(mod, "release")
+            tell("release", mod)
         return
 
-    # Usage tracking: a non-modifier key going down while >=1 modifier is
-    # held is a completed hotkey combo. Only report it if it matches a known,
-    # currently-bound combo (see load_bindings) — anything else (ordinary
-    # typing, an app's own shortcut, an unbound combo) is dropped right here.
+    # Usage tracking is opt-in and match-before-write. Unmatched keydowns
+    # never leave this process: no IPC, no log, no file.
     if not pressed:
+        return
+    load_watch()
+    if not remember_usage:
         return
     held_mods = sorted({MODS[c] for c in down})
     if not held_mods:
@@ -176,9 +303,16 @@ def on_key(code, value):
     if not key_name:
         return
     load_bindings()
-    identity = "+".join(held_mods) + ":" + key_name
-    if identity in known_bindings:
-        tell(identity, "used")
+    identity = "+".join(held_mods) + ":" + key_name.upper()
+    if identity not in known_bindings:
+        return
+    load_usage()
+    usage_counts[identity] = min(1000000, (usage_counts.get(identity) or 0) + 1)
+    if len(usage_counts) > 512:
+        extra = sorted(usage_counts, key=usage_counts.get)[: len(usage_counts) - 512]
+        for key in extra:
+            del usage_counts[key]
+    write_usage()
 
 
 def is_keyboard(dev):
@@ -187,19 +321,22 @@ def is_keyboard(dev):
 
 
 def open_devices():
-    for path in glob.glob("/dev/input/event*"):
-        if path in devices:
-            continue
-        try:
-            dev = evdev.InputDevice(path)
-            if not is_keyboard(dev):
-                dev.close()
+    def _open():
+        for path in glob.glob("/dev/input/event*"):
+            if path in devices:
                 continue
-        except OSError:
-            continue
-        devices[path] = dev
-        for code in dev.active_keys():
-            on_key(code, 1)
+            try:
+                dev = evdev.InputDevice(path)
+                if not is_keyboard(dev):
+                    dev.close()
+                    continue
+            except OSError:
+                continue
+            devices[path] = dev
+            for code in dev.active_keys():
+                on_key(code, 1)
+
+    as_root(_open)
 
 
 def drop_devices():
@@ -209,8 +346,11 @@ def drop_devices():
                 dev.close()
                 del devices[path]
         except OSError:
-            dev.close()
-            del devices[path]
+            try:
+                dev.close()
+            except OSError:
+                pass
+            devices.pop(path, None)
 
 
 def on_signal(sig, frame):
@@ -218,29 +358,66 @@ def on_signal(sig, frame):
     stopping = True
 
 
-signal.signal(signal.SIGTERM, on_signal)
-signal.signal(signal.SIGINT, on_signal)
-
-open_devices()
-last_scan = time.monotonic()
-while not stopping:
+def parse_args():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--uid", type=int, required=True)
+    args = parser.parse_args()
+    if args.uid <= 0:
+        sys.exit(2)
     try:
-        fds = [dev.fd for dev in devices.values()]
-        r, _, _ = select.select(fds, [], [], SCAN_INTERVAL)
-        for fd in r:
-            for dev in devices.values():
-                if dev.fd == fd:
+        pwd.getpwuid(args.uid)
+    except KeyError:
+        sys.exit(2)
+    return args.uid
+
+
+def main():
+    global target_uid, target_gid, pw_home
+    target_uid = parse_args()
+    pw = pwd.getpwuid(target_uid)
+    target_gid = pw.pw_gid
+    pw_home = pw.pw_dir
+
+    if os.geteuid() != 0:
+        sys.stderr.write("hotkey-watcher must start as root to open /dev/input\n")
+        sys.exit(1)
+
+    os.setgid(target_gid)
+    os.seteuid(target_uid)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+    open_devices()
+    last_scan = time.monotonic()
+    while not stopping:
+        try:
+            fds = [dev.fd for dev in devices.values()]
+            r, _, _ = select.select(fds, [], [], SCAN_INTERVAL)
+            for fd in r:
+                for dev in list(devices.values()):
+                    if dev.fd != fd:
+                        continue
                     try:
                         for ev in dev.read():
                             if ev.type == ecodes.EV_KEY:
                                 on_key(ev.code, ev.value)
                     except OSError:
-                        dev.close()
-                        devices = {p: d for p, d in devices.items() if d.fd != fd}
+                        try:
+                            dev.close()
+                        except OSError:
+                            pass
+                        for p, d in list(devices.items()):
+                            if d.fd == fd:
+                                del devices[p]
                     break
-    except OSError:
-        pass
-    if time.monotonic() - last_scan > SCAN_INTERVAL:
-        open_devices()
-        drop_devices()
-        last_scan = time.monotonic()
+        except OSError:
+            pass
+        if time.monotonic() - last_scan > SCAN_INTERVAL:
+            open_devices()
+            drop_devices()
+            last_scan = time.monotonic()
+
+
+if __name__ == "__main__":
+    main()

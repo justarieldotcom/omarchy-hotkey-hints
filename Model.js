@@ -1,9 +1,17 @@
-// Pure parsing logic for t480.hotkey-hints. No QML/Quickshell imports here —
+// Pure parsing logic for io.github.mikus2604.hotkey-hints. No QML/Quickshell imports here —
 // keep parsing/grouping testable in isolation, mirroring the sibling
 // control-station plugin's Model.js convention.
 .pragma library
 
 var LEADING_MODS = ["SUPER", "ALT", "CTRL", "SHIFT"]
+var MAX_KB_TEXT = 262144
+var MAX_KB_LINES = 4000
+var MAX_LINE = 512
+var MAX_DESC = 20
+var MAX_USAGE_KEYS = 512
+var MAX_USAGE_COUNT = 1000000
+var MAX_BINDINGS = 4096
+var IDENTITY_RE = /^[A-Z0-9+]{1,80}:[A-Z0-9._-]{1,64}$/
 
 // One line of `omarchy menu keybindings --print` looks like:
 //   "SUPER SHIFT ALT + B                 → Browser (private)"
@@ -62,9 +70,15 @@ function groupKeybindings(text) {
   var groups = {}
   for (var i = 0; i < LEADING_MODS.length; i++) groups[LEADING_MODS[i]] = []
 
-  var lines = String(text || "").split("\n")
-  for (var j = 0; j < lines.length; j++) {
-    var entry = parseKeybindingLine(lines[j])
+  var raw = String(text || "")
+  if (raw.length > MAX_KB_TEXT) return groups
+
+  var lines = raw.split("\n")
+  var limit = Math.min(lines.length, MAX_KB_LINES)
+  for (var j = 0; j < limit; j++) {
+    var line = lines[j]
+    if (line.length > MAX_LINE) continue
+    var entry = parseKeybindingLine(line)
     if (!entry || !entry.leading) continue
     if (LEADING_MODS.indexOf(entry.leading) < 0) continue
     groups[entry.leading].push({
@@ -160,8 +174,8 @@ function stepsForHeld(groups, held, maxDirect, usageCounts) {
 
 function clipDescription(text) {
   if (typeof text !== "string") return ""
-  text = text.replace(/\s+/g, " ").trim()
-  return text.length > 20 ? text.slice(0, 19).trim() + "…" : text
+  text = text.replace(/[\x00-\x1f\x7f<>&]/g, "").replace(/\s+/g, " ").trim()
+  return text.length > MAX_DESC ? text.slice(0, MAX_DESC - 1).trim() + "…" : text
 }
 
 // Canonical identity for a mods+key combo: mods upper-cased and sorted, key
@@ -184,7 +198,10 @@ function flattenBindingIdentities(groups) {
   var out = []
   for (var i = 0; i < LEADING_MODS.length; i++) {
     var list = groups[LEADING_MODS[i]] || []
-    for (var j = 0; j < list.length; j++) out.push(usageIdentity(list[j].mods, list[j].key))
+    for (var j = 0; j < list.length; j++) {
+      if (out.length >= MAX_BINDINGS) break
+      out.push(usageIdentity(list[j].mods, list[j].key))
+    }
   }
   out.sort()
   var deduped = []
@@ -200,12 +217,20 @@ function flattenBindingIdentities(groups) {
 // should just mean "no usage history yet", never break the overlay.
 function parseUsageCounts(text) {
   var out = {}
+  var raw = String(text || "")
+  if (raw.length > 65536) return out
   try {
-    var parsed = JSON.parse(text || "{}")
+    var parsed = JSON.parse(raw || "{}")
     if (parsed && typeof parsed === "object") {
+      var nkeys = 0
       for (var key in parsed) {
+        if (!IDENTITY_RE.test(key)) continue
         var n = parseInt(parsed[key], 10)
-        if (n > 0) out[key] = n
+        if (n > 0 && n <= MAX_USAGE_COUNT) {
+          out[key] = n
+          nkeys += 1
+          if (nkeys >= MAX_USAGE_KEYS) break
+        }
       }
     }
   } catch (e) {}
@@ -237,6 +262,7 @@ function pickBarEntrySettings(shellConfig, pluginId) {
 function selfCheck() {
   var sample = [
     "SUPER + K                           → Keybindings",
+    "SUPER + N                           → Neovim",
     "SUPER SHIFT ALT + B                 → Browser (private)",
     "CTRL ALT + DELETE                   → Close all windows",
     "PRINT                                → Screenshot",
@@ -248,15 +274,15 @@ function selfCheck() {
 
   var g = groupKeybindings(sample)
 
-  console.assert(g.SUPER.length === 5, "SUPER bucket should have 5 entries, got " + g.SUPER.length)
+  console.assert(g.SUPER.length === 6, "SUPER bucket should have 6 entries, got " + g.SUPER.length)
   console.assert(g.SUPER[0].combo === "K", "shortest SUPER combo should sort first, got " + g.SUPER[0].combo)
   console.assert(g.CTRL.length === 1 && g.CTRL[0].description === "Close all windows",
     "CTRL leading bucket wrong")
 
   // held = [SUPER]: direct 2-key combos + branches for SHIFT and CTRL.
   var l1 = stepsForHeld(g, ["SUPER"], 8)
-  console.assert(l1.direct.length === 1 && l1.direct[0].key === "K" && l1.direct[0].description === "Keybindings",
-    "SUPER level should list the SUPER+K direct combo, got " + JSON.stringify(l1.direct))
+  console.assert(l1.direct.length === 2 && l1.direct[0].key === "K" && l1.direct[1].key === "N",
+    "SUPER level should list K then N, got " + JSON.stringify(l1.direct))
   console.assert(l1.overflow === 0, "no overflow at SUPER level, got " + l1.overflow)
   console.assert(l1.branches.length === 2 && l1.branches[0].mod === "Ctrl" && l1.branches[1].mod === "Shift",
     "SUPER level branches should be Ctrl and Shift (LEADING_MODS order), got " + JSON.stringify(l1.branches))
@@ -275,16 +301,16 @@ function selfCheck() {
 
   // Cap must truncate and report overflow.
   var capped = stepsForHeld(g, ["SUPER"], 1)
-  console.assert(capped.direct.length === 1 && capped.overflow === 0,
-    "cap=1 with 1 direct should show it, got " + JSON.stringify(capped.direct))
+  console.assert(capped.direct.length === 1 && capped.overflow === 1,
+    "cap=1 with 2 directs should overflow 1, got " + JSON.stringify(capped))
 
   // 3-mod binding SUPER SHIFT ALT + B only appears once SHIFT has been added.
   var withShift = stepsForHeld(g, ["SUPER", "SHIFT"], 8)
   console.assert(withShift.branches.length === 1 && withShift.branches[0].mod === "Alt",
     "SUPER+SHIFT should branch into Alt, got " + JSON.stringify(withShift.branches))
 
-  var cfg = { bar: { layout: { right: [{ id: "other.plugin", x: 1 }, { id: "t480.hotkey-hints", fontSize: 15, position: "top" }] } } }
-  var picked = pickBarEntrySettings(cfg, "t480.hotkey-hints")
+  var cfg = { bar: { layout: { right: [{ id: "other.plugin", x: 1 }, { id: "io.github.mikus2604.hotkey-hints", fontSize: 15, position: "top" }] } } }
+  var picked = pickBarEntrySettings(cfg, "io.github.mikus2604.hotkey-hints")
   console.assert(picked.fontSize === 15 && picked.position === "top" && picked.id === undefined,
     "pickBarEntrySettings should return this plugin's own fields, minus id")
   console.assert(Object.keys(pickBarEntrySettings(cfg, "missing.plugin")).length === 0,
@@ -307,8 +333,9 @@ function selfCheck() {
 
   // held = [SUPER] with usage favoring V (SUPER+V is otherwise alphabetically
   // after K): usage count should override the alnum tiebreaker.
-  var withUsage = stepsForHeld(g, ["SUPER"], 8, { "SUPER:K": 1, "SUPER:B": 0 })
-  console.assert(withUsage.direct[0].key === "K", "usage-tracked ordering should put the used combo first, got " + JSON.stringify(withUsage.direct))
+  var withUsage = stepsForHeld(g, ["SUPER"], 8, { "SUPER:N": 9, "SUPER:K": 1 })
+  console.assert(withUsage.direct[0].key === "N" && withUsage.direct[1].key === "K",
+    "usage-tracked ordering should put N ahead of K, got " + JSON.stringify(withUsage.direct))
   // Passing no usageCounts (or {}) must reproduce the exact pre-usage ordering.
   var withoutUsage = stepsForHeld(g, ["SUPER"], 8)
   console.assert(JSON.stringify(withoutUsage) === JSON.stringify(l1),
