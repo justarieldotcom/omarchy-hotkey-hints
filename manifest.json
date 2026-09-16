@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "t480.hotkey-hints",
+  "id": "io.github.mikus2604.hotkey-hints",
   "name": "Hotkey Hints",
-  "version": "1.1.0",
-  "author": "t480",
+  "version": "1.2.0",
+  "author": "mikus2604",
   "license": "MIT",
-  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it \u2014 then add more modifiers to drill in. Esc or release closes.",
+  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it — then add more modifiers to drill in. Release the last modifier to close.",
   "kinds": [
     "panel",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Hotkey Hints",
-    "description": "Settings for the hold-a-modifier hotkey overlay (the overlay itself has no bar popup \u2014 it only appears while a modifier is held).",
+    "description": "Settings for the hold-a-modifier hotkey overlay (the overlay itself has no bar popup — it only appears while a modifier is held).",
     "category": "Info",
     "aliases": [
       "hotkey-hints",
@@ -33,6 +33,7 @@
       "position": "center",
       "opacity": 0.97,
       "maxDirect": 6,
+      "revealDelayMs": 280,
       "rememberUsage": false
     },
     "schema": [
@@ -62,6 +63,16 @@
         "step": 2
       },
       {
+        "key": "revealDelayMs",
+        "type": "integer",
+        "label": "Reveal delay (ms)",
+        "defaultValue": 280,
+        "min": 120,
+        "max": 600,
+        "step": 20,
+        "description": "How long a modifier must be held before the card appears. Stops ordinary taps and capital letters from flashing it."
+      },
+      {
         "key": "position",
         "type": "enum",
         "label": "Position",
@@ -89,14 +100,14 @@
         "min": 2,
         "max": 24,
         "step": 1,
-        "description": "How many completed hotkeys are listed at once. Keep low so the overlay never covers more than a sliver of the screen; extras collapse into a '+N more' chip."
+        "description": "How many completed hotkeys are listed at once. Extras collapse into a '+N more' chip."
       },
       {
         "key": "rememberUsage",
         "type": "boolean",
         "label": "Remember most-used hotkeys",
         "defaultValue": false,
-        "description": "Sort each level's hotkey chips by how often you actually press them, most-used first. Only real, currently-bound combos you press are ever counted (never ordinary typing or app shortcuts); counts are stored locally in ~/.local/state/omarchy/hotkey-hints-usage.json. Turning this off keeps the counts but stops using them; use Reset to clear them."
+        "description": "Sort each level's chips by how often you press that bound combo. Off by default. When on, the watcher inspects non-modifier keydowns only while a modifier is held and only writes a count after matching a known binding. Counts live in ~/.local/state/omarchy/hotkey-hints/usage.json."
       }
     ]
   }

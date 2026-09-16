@@ -7,65 +7,48 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The always-loaded hold-a-modifier overlay ("panel" kind, like omarchy.osd —
-// no bar icon of its own). A small evdev watcher (hotkey-watcher.py in this
-// directory, run as a root systemd service) calls this plugin's IPC target on
-// press/release of each canonical modifier (SUPER, ALT, CTRL, SHIFT), reading
-// the physical keys from the kernel because Hyprland's own modifier binds
-// silently drop release events. This file only reacts to those calls; it never
-// reads the keyboard itself. Settings (font, padding, position, opacity, and the
-// direct-combo cap) are edited from the small t480.hotkey-hints bar icon
-// (Widget.qml) and persisted into shell.json like any other bar widget; this
-// file re-reads that same file directly since a bare "panel" plugin gets no
-// injected `settings` prop the way a bar-widget popup does.
-//
-// Progressive disclosure: holding the first modifier shows only the single
-// keys that complete a combo (+ Space → Menu) and the modifier branches that
-// go deeper (+ Ctrl · 12). Adding another held modifier drills one level in.
-// The card is a free-floating Overlay-layer surface: drag it anywhere with the
-// mouse, resize it from the bottom-right corner (content reflows and the type
-// scales with the width), and typing is never interrupted — `keyboardFocus`
-// is None, so key events keep going to whatever window has focus underneath.
-// Closing: releasing the last held modifier closes it (release IPC arrives
-// instantly via the plugin's own evdev watcher, which bypasses Hyprland's
-// broken bindr); a stuckGuard timer is kept as insurance in case the watcher
-// stops unexpectedly.
-//
-// Usage tracking (opt-in via the `rememberUsage` setting): this file writes
-// the flattened set of known bindings to bindingsFile on every keybindings
-// refresh; the watcher matches real keypresses against that file and, only
-// for a match, calls the `used` IPC below. That match-before-report split is
-// what lets the watcher read regular keys (not just modifiers) without
-// becoming a keylogger — anything that isn't an actual bound hotkey never
-// leaves the watcher process.
+// Always-loaded hold-a-modifier overlay (panel kind). Never reads the keyboard;
+// it only reacts to IPC press/release/dismiss/state/ping from the root-owned
+// watcher installed to /usr/local/libexec/omarchy-hotkey-hints/.
 Item {
   id: root
 
-  readonly property string pluginId: "t480.hotkey-hints"
+  readonly property string pluginId: "io.github.mikus2604.hotkey-hints"
   readonly property var leadingMods: ["SUPER", "ALT", "CTRL", "SHIFT"]
+  readonly property int maxHelperBytes: 262144
+  readonly property int helperDeadlineMs: 20000
 
-  // ------------------------------------------------------------- state
-  // Modifiers currently held, in press order. Reassigning the array (never
-  // mutating) triggers onHeldChanged -> content recompute.
+  function localPath(url) {
+    var value = String(url || "")
+    if (value.indexOf("file://") === 0) value = value.substring(7)
+    try { return decodeURIComponent(value) } catch (error) { return value }
+  }
+  readonly property string sourceDir: {
+    var p = localPath(Qt.resolvedUrl("."))
+    if (p.length > 0 && p.charAt(p.length - 1) === "/") p = p.substring(0, p.length - 1)
+    return p
+  }
+  readonly property string homeDir: {
+    var h = String(Quickshell.env("HOME") || "")
+    if (h.charAt(0) !== "/" || h.indexOf("\0") >= 0) return ""
+    return h
+  }
+  readonly property string helperPy: sourceDir + "/scripts/state-file.py"
+  readonly property string helperKb: sourceDir + "/scripts/print-keybindings.sh"
+
   property var held: []
   property bool opened: false
   property var hintGroups: ({ SUPER: [], ALT: [], CTRL: [], SHIFT: [] })
   property var stepView: ({ direct: [], overflow: 0, branches: [] })
 
-  // Every leading modifier also doubles as part of ordinary typing or other
-  // shortcuts (Shift for capitals, Ctrl/Alt for their own combos, Super for
-  // its own SUPER+key binds) — those are pressed and released in well under
-  // 100-150ms. Deferring the reveal until the key has been held this long
-  // keeps the overlay from flashing on every capital letter or fast shortcut.
-  readonly property int revealDelayMs: 280
-  // Insurance only: normally the watcher's `release` IPC closes the overlay.
-  // This fires only if the watcher service is down or missed a release, so it
-  // can comfortably be long.
   readonly property int stuckCloseMs: 8000
 
-  // ------------------------------------------------------------- settings
   property var rawSettings: ({})
-  readonly property string fontFamily: rawSettings.fontFamily ? String(rawSettings.fontFamily) : Style.font.family
+  readonly property string fontFamily: {
+    var s = rawSettings.fontFamily ? String(rawSettings.fontFamily) : ""
+    s = s.replace(/[<>&\x00-\x1f\x7f]/g, "").slice(0, 64)
+    return s || Style.font.family
+  }
   readonly property int fontSize: {
     var v = parseInt(rawSettings.fontSize, 10)
     return (v >= 9 && v <= 28) ? v : Style.font.body
@@ -86,38 +69,14 @@ Item {
     var v = parseInt(rawSettings.maxDirect, 10)
     return (v >= 2 && v <= 24) ? v : 6
   }
+  readonly property int revealDelayMs: {
+    var v = parseInt(rawSettings.revealDelayMs, 10)
+    return (v >= 120 && v <= 600) ? v : 280
+  }
   readonly property bool rememberUsage: rawSettings.rememberUsage === true || rawSettings.rememberUsage === "true"
 
-  // ------------------------------------------------------------- usage tracking
-  // Map of Model.usageIdentity() -> press count, persisted to usageFile.
-  // Populated only by the watcher's `used` IPC call (which itself only fires
-  // for keys matching a binding in bindingsFile — see hotkey-watcher.py), so
-  // this never contains anything but real, bound hotkey combos.
   property var usageCounts: ({})
 
-  function bumpUsage(identity) {
-    if (!identity) return
-    var next = {}
-    for (var k in root.usageCounts) next[k] = root.usageCounts[k]
-    next[identity] = (next[identity] || 0) + 1
-    root.usageCounts = next
-    usageFile.setText(JSON.stringify(root.usageCounts, null, 2) + "\n")
-  }
-
-  function resetUsage() {
-    root.usageCounts = {}
-    usageFile.setText("{}\n")
-  }
-
-  function writeKnownBindings() {
-    bindingsFile.setText(JSON.stringify(Model.flattenBindingIdentities(root.hintGroups), null, 2) + "\n")
-  }
-
-  // --------------------------------------------------------------- geometry
-  // Free-floating card. `cardW`/`extraH` are the user's resize state
-  // (averaged over the session); the font scales with the width so content
-  // stays proportioned while resizing, the position is top-left anchor
-  // margins in output pixels.
   readonly property int baseW: 800
   property int cardW: baseW
   property int extraH: 0
@@ -188,12 +147,10 @@ Item {
     root.clampPos()
   }
 
-  // --------------------------------------------------------------- actions
   function press(mod) {
     mod = String(mod || "").toUpperCase()
     if (root.leadingMods.indexOf(mod) < 0) return
     if (root.held.indexOf(mod) >= 0) {
-      // Already held: keep-alive while browsing (resets the stuck guard).
       if (root.opened) stuckGuard.restart()
       return
     }
@@ -228,18 +185,18 @@ Item {
 
   onHeldChanged: recomputeSteps()
   onMaxDirectChanged: recomputeSteps()
-  onRememberUsageChanged: recomputeSteps()
+  onRememberUsageChanged: {
+    recomputeSteps()
+    root.writeWatch()
+  }
   onUsageCountsChanged: recomputeSteps()
 
-  // --------------------------------------------------------------- timers
   Timer {
     id: revealTimer
     interval: root.revealDelayMs
     onTriggered: {
       if (root.held.length === 0) return
       root.opened = true
-      // Seed/decentre after the content has laid out (cardH is stable then),
-      // unless the user has already dragged the card somewhere.
       recenterTimer.restart()
       stuckGuard.restart()
     }
@@ -260,10 +217,52 @@ Item {
     onTriggered: { root.dismiss() }
   }
 
+  function stopProc(proc, killer) {
+    if (proc.running) {
+      proc.signal(15)
+      killer.restart()
+    }
+  }
+
   function fetchKeybindings() {
-    keybindsProc.running = false
-    keybindsProc.command = ["omarchy", "menu", "keybindings", "--print"]
+    stopProc(keybindsProc, keybindsKill)
+    keybindsProc.buf = ""
+    keybindsProc.command = ["/usr/bin/bash", root.helperKb]
     keybindsProc.running = true
+    keybindsDeadline.restart()
+  }
+
+  function readShell() {
+    stopProc(shellReadProc, shellReadKill)
+    shellReadProc.buf = ""
+    shellReadProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPy, "read", "shell"]
+    shellReadProc.running = true
+    shellReadDeadline.restart()
+  }
+
+  function readUsage() {
+    stopProc(usageReadProc, usageReadKill)
+    usageReadProc.buf = ""
+    usageReadProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPy, "read", "usage"]
+    usageReadProc.running = true
+    usageReadDeadline.restart()
+  }
+
+  function writeState(kind, payload) {
+    stopProc(writeProc, writeKill)
+    writeProc.kind = kind
+    writeProc.payload = payload
+    writeProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPy, "write", kind]
+    writeProc.running = true
+    writeDeadline.restart()
+  }
+
+  function writeKnownBindings() {
+    root.writeState("bindings", JSON.stringify(Model.flattenBindingIdentities(root.hintGroups)))
+  }
+
+  function writeWatch() {
+    root.writeState("watch", JSON.stringify({ rememberUsage: root.rememberUsage }))
   }
 
   function applyShellConfig(text) {
@@ -275,54 +274,95 @@ Item {
     }
   }
 
-  Process {
-    id: keybindsProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.hintGroups = Model.groupKeybindings(text)
-        root.writeKnownBindings()
-        root.recomputeSteps()
-      }
+  function takeChunk(proc, chunk, killer) {
+    proc.buf += chunk
+    if (proc.buf.length > root.maxHelperBytes) {
+      proc.signal(15)
+      killer.restart()
+      proc.buf = ""
     }
   }
 
-  // Usage counts (Model.usageIdentity() -> press count), bumped only via the
-  // `used` IPC call below. Lives under ~/.local/state/omarchy like the
-  // built-in clipboard plugin's history file.
-  FileView {
-    id: usageFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-usage.json"
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.usageCounts = Model.parseUsageCounts(text())
-    onLoadFailed: root.usageCounts = ({})
+  Process {
+    id: keybindsProc
+    property string buf: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.takeChunk(keybindsProc, chunk, keybindsKill) }
+    }
+    onExited: function(code, status) {
+      keybindsDeadline.stop()
+      if (code === 0 && keybindsProc.buf)
+        root.hintGroups = Model.groupKeybindings(keybindsProc.buf)
+      root.writeKnownBindings()
+      root.recomputeSteps()
+      keybindsProc.buf = ""
+    }
   }
+  Timer { id: keybindsDeadline; interval: root.helperDeadlineMs; onTriggered: { keybindsProc.signal(15); keybindsKill.restart() } }
+  Timer { id: keybindsKill; interval: 2000; onTriggered: keybindsProc.signal(9) }
 
-  // The flattened set of every known binding's usage identity, written
-  // whenever hintGroups is (re)computed. hotkey-watcher.py reads this to
-  // decide whether a keypress is a real, bound hotkey before ever reporting
-  // it — this file is the only thing that keeps the root watcher from acting
-  // on ordinary typing.
-  FileView {
-    id: bindingsFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-bindings.json"
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
+  Process {
+    id: shellReadProc
+    property string buf: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.takeChunk(shellReadProc, chunk, shellReadKill) }
+    }
+    onExited: function(code, status) {
+      shellReadDeadline.stop()
+      if (code === 0) root.applyShellConfig(shellReadProc.buf)
+      shellReadProc.buf = ""
+    }
   }
+  Timer { id: shellReadDeadline; interval: root.helperDeadlineMs; onTriggered: { shellReadProc.signal(15); shellReadKill.restart() } }
+  Timer { id: shellReadKill; interval: 2000; onTriggered: shellReadProc.signal(9) }
 
-  // Settings live in the bar entry's inline shell.json config (edited via
-  // Widget.qml's popup); re-read that file directly so this always-loaded
-  // overlay stays current without needing a bar-entry injection.
+  Process {
+    id: usageReadProc
+    property string buf: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(chunk) { root.takeChunk(usageReadProc, chunk, usageReadKill) }
+    }
+    onExited: function(code, status) {
+      usageReadDeadline.stop()
+      if (code === 0) root.usageCounts = Model.parseUsageCounts(usageReadProc.buf)
+      usageReadProc.buf = ""
+    }
+  }
+  Timer { id: usageReadDeadline; interval: root.helperDeadlineMs; onTriggered: { usageReadProc.signal(15); usageReadKill.restart() } }
+  Timer { id: usageReadKill; interval: 2000; onTriggered: usageReadProc.signal(9) }
+
+  Process {
+    id: writeProc
+    property string payload: ""
+    property string kind: ""
+    stdinEnabled: true
+    onStarted: writeProc.write(writeProc.payload)
+    onExited: function(code, status) { writeDeadline.stop() }
+  }
+  Timer { id: writeDeadline; interval: root.helperDeadlineMs; onTriggered: { writeProc.signal(15); writeKill.restart() } }
+  Timer { id: writeKill; interval: 2000; onTriggered: writeProc.signal(9) }
+
   FileView {
-    id: shellConfigFile
-    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    id: shellWatch
+    path: root.homeDir !== "" ? root.homeDir + "/.config/omarchy/shell.json" : ""
+    preload: false
     watchChanges: true
+    blockAllReads: true
     printErrors: false
-    onLoaded: root.applyShellConfig(text())
-    onFileChanged: reload()
+    onFileChanged: root.readShell()
+  }
+
+  FileView {
+    id: usageWatch
+    path: root.homeDir !== "" ? root.homeDir + "/.local/state/omarchy/hotkey-hints/usage.json" : ""
+    preload: false
+    watchChanges: true
+    blockAllReads: true
+    printErrors: false
+    onFileChanged: root.readUsage()
   }
 
   IpcHandler {
@@ -332,29 +372,22 @@ Item {
     function dismiss(): string { root.dismiss(); return "ok" }
     function state(): string { return root.opened ? "open" : "closed" }
     function ping(): string { return "ok" }
-    // Called only by hotkey-watcher.py, and only for an `identity` it already
-    // matched against bindingsFile — so this never records anything but a
-    // real, currently-bound hotkey combo. A no-op while the setting is off,
-    // so flipping it back on later doesn't need to "catch up" on anything
-    // missed (nothing was missed — it's just not recorded until enabled).
-    function used(identity: string): string {
-      if (root.rememberUsage) root.bumpUsage(identity)
-      return "ok"
-    }
-    function resetUsage(): string { root.resetUsage(); return "ok" }
   }
 
   Component.onCompleted: {
     fetchKeybindings()
-    shellConfigFile.reload()
-    usageFile.reload()
+    readShell()
+    readUsage()
+    writeWatch()
   }
 
-  // A card-sized layer surface. Anchored top-left with pixel margins so it
-  // can float anywhere; sized exactly to the card, so the input region (the
-  // default mask = the whole surface) is the card and nothing else. Keyboard
-  // interactivity is None: keystrokes keep flowing to the window underneath,
-  // so typing while the hints are up is never hijacked.
+  Component.onDestruction: {
+    keybindsProc.signal(15)
+    shellReadProc.signal(15)
+    usageReadProc.signal(15)
+    writeProc.signal(15)
+  }
+
   PanelWindow {
     id: panel
     visible: root.opened
@@ -362,7 +395,7 @@ Item {
     implicitHeight: root.cardH
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.namespace: "t480-hotkey-hints"
+    WlrLayershell.namespace: "io-github-mikus2604-hotkey-hints"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
@@ -395,7 +428,6 @@ Item {
           width: card.width - card.borderLeft - card.borderRight - 2 * root.pad
           spacing: Math.max(2, Style.spacing.sm)
 
-          // ---- header: breadcrumb of held modifiers + dragging hint
           RowLayout {
             width: parent.width
             spacing: Style.spacing.sm
@@ -428,7 +460,6 @@ Item {
             }
           }
 
-          // ---- single compact chip row: direct combos, overflow, branches
           Flow {
             visible: root.stepView.direct.length > 0
               || root.stepView.branches.length > 0
@@ -525,7 +556,6 @@ Item {
             }
           }
 
-          // ---- nothing reachable under this prefix
           Repeater {
             model: root.stepView.direct.length === 0
               && root.stepView.branches.length === 0
@@ -545,7 +575,6 @@ Item {
         }
       }
 
-      // ---- drag anywhere to move the card
       MouseArea {
         anchors.fill: parent
         cursorShape: Qt.SizeAllCursor
@@ -556,7 +585,6 @@ Item {
         onPositionChanged: function(m) { root.dragMove(m.x, m.y) }
       }
 
-      // ---- bottom-right corner: resize grip
       Rectangle {
         id: resizeGrip
         width: Math.max(16, Style.space(14))
@@ -567,6 +595,7 @@ Item {
         radius: Math.min(6, Style.cornerRadius / 2)
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: "⤡"
           font.family: root.fontFamily

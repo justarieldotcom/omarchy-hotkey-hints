@@ -1,0 +1,27 @@
+# Template only. scripts/install.sh writes the live unit with the session uid
+# and a root-owned ExecStart. Do not copy this file to systemd as-is.
+[Unit]
+Description=Omarchy hotkey-hints modifier key watcher
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/omarchy-hotkey-hints/hotkey-watcher.py --uid __UID__
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ReadWritePaths=-__STATE__
+DevicePolicy=closed
+DeviceAllow=/dev/input/event* r
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+MemoryMax=64M
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
