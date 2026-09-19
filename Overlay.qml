@@ -3,21 +3,32 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 
 // The always-loaded hold-a-modifier overlay ("panel" kind, like omarchy.osd —
-// no bar icon of its own). A small evdev watcher (hotkey-watcher.py in this
-// directory, run as a root systemd service) calls this plugin's IPC target on
-// press/release of each canonical modifier (SUPER, ALT, CTRL, SHIFT), reading
-// the physical keys from the kernel because Hyprland's own modifier binds
-// silently drop release events. This file only reacts to those calls; it never
-// reads the keyboard itself. Settings (font, padding, position, opacity, and the
-// direct-combo cap) are edited from the small t480.hotkey-hints bar icon
-// (Widget.qml) and persisted into shell.json like any other bar widget; this
-// file re-reads that same file directly since a bare "panel" plugin gets no
-// injected `settings` prop the way a bar-widget popup does.
+// no bar icon of its own).
+//
+// This file owns a small evdev helper (hotkey-watcher.py, next to this file):
+// it launches it as an ordinary *unprivileged* child process and reads one
+// line per event off its stdout — `press SUPER`, `release CTRL`,
+// `used CTRL+SUPER:V`. The helper reads the physical keys from the kernel
+// because Hyprland's own modifier binds silently drop release events (see
+// docs/DEVNOTES.md). Reading /dev/input needs membership in the `input` group
+// and nothing else: no root, no systemd unit, no setuid. The helper is wrapped
+// in `setpriv --pdeathsig TERM` so it can never outlive this shell, the same
+// way the built-in clipboard plugin supervises `wl-paste --watch`.
+//
+// This file still never interprets the keyboard itself — it only acts on the
+// helper's validated lines (and on the IPC calls below, kept for testing).
+//
+// Settings (font, padding, position, opacity, and the direct-combo cap) are
+// edited from the small bar icon (Widget.qml) and persisted into shell.json
+// like any other bar widget; this file re-reads that same file directly since
+// a bare "panel" plugin gets no injected `settings` prop the way a bar-widget
+// popup does.
 //
 // Progressive disclosure: holding the first modifier shows only the single
 // keys that complete a combo (+ Space → Menu) and the modifier branches that
@@ -26,22 +37,21 @@ import "Model.js" as Model
 // mouse, resize it from the bottom-right corner (content reflows and the type
 // scales with the width), and typing is never interrupted — `keyboardFocus`
 // is None, so key events keep going to whatever window has focus underneath.
-// Closing: releasing the last held modifier closes it (release IPC arrives
-// instantly via the plugin's own evdev watcher, which bypasses Hyprland's
-// broken bindr); a stuckGuard timer is kept as insurance in case the watcher
-// stops unexpectedly.
+// Closing: releasing the last held modifier closes it (the `release` line
+// arrives within tens of milliseconds, bypassing Hyprland's broken bindr); a
+// stuckGuard timer is kept as insurance in case the helper stops unexpectedly.
 //
 // Usage tracking (opt-in via the `rememberUsage` setting): this file writes
 // the flattened set of known bindings to bindingsFile on every keybindings
-// refresh; the watcher matches real keypresses against that file and, only
-// for a match, calls the `used` IPC below. That match-before-report split is
-// what lets the watcher read regular keys (not just modifiers) without
-// becoming a keylogger — anything that isn't an actual bound hotkey never
-// leaves the watcher process.
+// refresh; the helper matches real keypresses against that file and, only for
+// a match, prints a `used <identity>` line. That match-before-report split is
+// what lets the helper read regular keys (not just modifiers) without becoming
+// a keylogger — anything that isn't an actual bound hotkey never leaves the
+// helper process.
 Item {
   id: root
 
-  readonly property string pluginId: "t480.hotkey-hints"
+  readonly property string pluginId: "justarieldotcom.hotkey-hints"
   readonly property var leadingMods: ["SUPER", "ALT", "CTRL", "SHIFT"]
 
   // ------------------------------------------------------------- state
@@ -58,9 +68,9 @@ Item {
   // 100-150ms. Deferring the reveal until the key has been held this long
   // keeps the overlay from flashing on every capital letter or fast shortcut.
   readonly property int revealDelayMs: 280
-  // Insurance only: normally the watcher's `release` IPC closes the overlay.
-  // This fires only if the watcher service is down or missed a release, so it
-  // can comfortably be long.
+  // Insurance only: normally the helper's `release` line closes the overlay.
+  // This fires only if the helper is down or missed a release, so it can
+  // comfortably be long.
   readonly property int stuckCloseMs: 8000
 
   // ------------------------------------------------------------- settings
@@ -88,11 +98,28 @@ Item {
   }
   readonly property bool rememberUsage: rawSettings.rememberUsage === true || rawSettings.rememberUsage === "true"
 
+  // ------------------------------------------------------------- state paths
+  // Honour XDG_STATE_HOME the way the built-in agents plugin does
+  // (Quickshell.env returns falsy when a variable is unset).
+  readonly property string homeDir: Quickshell.env("HOME")
+  readonly property string stateDir:
+    (Quickshell.env("XDG_STATE_HOME") || root.homeDir + "/.local/state") + "/omarchy"
+
+  // FileView does not create parent directories, and ~/.local/state/omarchy
+  // does not exist on a fresh machine. Same best-effort approach the built-in
+  // notifications plugin uses: fire the mkdir, then defer the first write a
+  // turn. A missed race just means no usage tracking until the next refresh —
+  // the helper already tolerates the allowlist being absent.
+  Process {
+    id: ensureStateDirProc
+    command: ["mkdir", "-p", root.stateDir]
+  }
+
   // ------------------------------------------------------------- usage tracking
   // Map of Model.usageIdentity() -> press count, persisted to usageFile.
-  // Populated only by the watcher's `used` IPC call (which itself only fires
-  // for keys matching a binding in bindingsFile — see hotkey-watcher.py), so
-  // this never contains anything but real, bound hotkey combos.
+  // Populated only by the helper's `used` lines (which it only prints for keys
+  // matching a binding in bindingsFile — see hotkey-watcher.py), so this never
+  // contains anything but real, bound hotkey combos.
   property var usageCounts: ({})
 
   function bumpUsage(identity) {
@@ -111,6 +138,109 @@ Item {
 
   function writeKnownBindings() {
     bindingsFile.setText(JSON.stringify(Model.flattenBindingIdentities(root.hintGroups), null, 2) + "\n")
+  }
+
+  // ------------------------------------------------------------- watcher
+  // The helper lives next to this file. Derive its path the same way the
+  // shell's own PluginRegistry finds this plugin — pluginsDir + plugin id —
+  // rather than converting Qt.resolvedUrl() back to a filesystem path, which
+  // would mean undoing Util.fileUrl()'s per-segment percent-encoding by hand.
+  readonly property string watcherScript:
+    root.homeDir + "/.config/omarchy/plugins/" + root.pluginId + "/hotkey-watcher.py"
+
+  // starting | running | no-input-access | no-keyboard | missing-evdev | failed
+  property string watcherStatus: "starting"
+  property int watcherRetries: 0
+  // Set for the reasons a retry cannot fix (see startWatcher). Group
+  // membership only takes effect on a new login session, and a missing package
+  // needs installing, so retrying those on a timer just burns CPU and hides
+  // the problem. Widget.qml surfaces the status and offers a manual retry.
+  property bool watcherBlocked: false
+
+  // Only these exact shapes are acted on. The helper is the one component that
+  // sees raw key data, so its output is parsed strictly rather than trusted:
+  // anything not matching is dropped without reaching press()/bumpUsage().
+  readonly property var reMod: /^(press|release) (SUPER|ALT|CTRL|SHIFT)$/
+  readonly property var reUsed: /^used ((?:SUPER|ALT|CTRL|SHIFT)(?:\+(?:SUPER|ALT|CTRL|SHIFT))*:[A-Z0-9_ ]+)$/
+  readonly property var reError: /^error (no-input-access|no-keyboard|missing-evdev)$/
+
+  function handleWatcherLine(rawLine) {
+    var line = String(rawLine || "").trim()
+    if (line === "") return
+
+    var m = root.reMod.exec(line)
+    if (m) {
+      root.watcherStatus = "running"
+      root.watcherRetries = 0
+      if (m[1] === "press") root.press(m[2])
+      else root.release(m[2])
+      return
+    }
+
+    m = root.reUsed.exec(line)
+    if (m) {
+      root.watcherStatus = "running"
+      root.watcherRetries = 0
+      if (root.rememberUsage) root.bumpUsage(m[1])
+      return
+    }
+
+    m = root.reError.exec(line)
+    if (m) {
+      root.watcherStatus = m[1]
+      root.watcherBlocked = true
+      watcherRestartTimer.stop()
+      console.warn(root.pluginId + ": hotkey watcher cannot start: " + m[1]
+        + (m[1] === "no-input-access"
+          ? " (add your user to the 'input' group, then log out and back in)"
+          : m[1] === "missing-evdev" ? " (install python-evdev)" : ""))
+      return
+    }
+
+    // Unrecognised line: ignored on purpose, never forwarded.
+  }
+
+  function startWatcher() {
+    if (root.watcherBlocked) return
+    root.watcherStatus = "starting"
+    watcherProc.running = false
+    watcherProc.running = true
+  }
+
+  function retryWatcher() {
+    root.watcherBlocked = false
+    root.watcherRetries = 0
+    root.startWatcher()
+  }
+
+  Process {
+    id: watcherProc
+    // setpriv --pdeathsig TERM: the helper dies with the shell rather than
+    // being orphaned across a restart (same guard as the clipboard plugin).
+    // python3 -u: line-buffered stdout, without touching the child's
+    // environment. Invoked via python3 so a lost exec bit can't break it.
+    command: ["setpriv", "--pdeathsig", "TERM", "python3", "-u",
+              root.watcherScript, bindingsFile.path]
+    stdout: SplitParser {
+      onRead: function(line) { root.handleWatcherLine(line) }
+    }
+    // No parameters needed: the helper reports *why* it gave up on stdout
+    // (handleWatcherLine sets watcherBlocked), so an exit code would add
+    // nothing. Bare handler also matches the clipboard plugin's watcher.
+    onExited: {
+      if (root.watcherBlocked) return // already reported a permanent reason
+      root.watcherStatus = "failed"
+      var delay = Math.min(1000 * Math.pow(2, root.watcherRetries), 30000)
+      root.watcherRetries += 1
+      watcherRestartTimer.interval = delay
+      watcherRestartTimer.restart()
+    }
+  }
+
+  Timer {
+    id: watcherRestartTimer
+    repeat: false
+    onTriggered: root.startWatcher()
   }
 
   // --------------------------------------------------------------- geometry
@@ -139,6 +269,22 @@ Item {
 
   function screenW() { return panel.screen ? panel.screen.width : 0 }
   function screenH() { return panel.screen ? panel.screen.height : 0 }
+
+  // The output Hyprland currently has focused, resolved by name against
+  // Quickshell.screens — the same indirection the built-in bar uses
+  // (focusedScreenName() in plugins/bar/Bar.qml). Without this the card can
+  // open on the wrong output on a multi-monitor setup, and seedPosition() /
+  // clampPos() then measure that wrong output's geometry.
+  function focusedScreen() {
+    var monitor = Hyprland.focusedMonitor
+    var name = monitor ? String(monitor.name || "") : ""
+    if (name === "") return null
+    var screens = Quickshell.screens || []
+    for (var i = 0; i < screens.length; i++) {
+      if (screens[i] && String(screens[i].name || "") === name) return screens[i]
+    }
+    return null
+  }
 
   function clampPos() {
     var sw = root.screenW(), sh = root.screenH()
@@ -237,6 +383,13 @@ Item {
     interval: root.revealDelayMs
     onTriggered: {
       if (root.held.length === 0) return
+      // Pick the output *before* flipping `opened`, so the screen is only ever
+      // assigned while the layer surface is unmapped — nothing in this shell
+      // reassigns .screen on a visible window. A null result (Hyprland hasn't
+      // reported a monitor yet) deliberately leaves the last good screen in
+      // place rather than resetting to output 0.
+      var target = root.focusedScreen()
+      if (target) panel.screen = target
       root.opened = true
       // Seed/decentre after the content has laid out (cardH is stable then),
       // unless the user has already dragged the card somewhere.
@@ -292,7 +445,7 @@ Item {
   // built-in clipboard plugin's history file.
   FileView {
     id: usageFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-usage.json"
+    path: root.stateDir + "/hotkey-hints-usage.json"
     watchChanges: false
     atomicWrites: true
     printErrors: false
@@ -303,11 +456,11 @@ Item {
   // The flattened set of every known binding's usage identity, written
   // whenever hintGroups is (re)computed. hotkey-watcher.py reads this to
   // decide whether a keypress is a real, bound hotkey before ever reporting
-  // it — this file is the only thing that keeps the root watcher from acting
-  // on ordinary typing.
+  // it — this file is the only thing that keeps the helper from acting on
+  // ordinary typing, and its path is handed to the helper on the command line.
   FileView {
     id: bindingsFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/hotkey-hints-bindings.json"
+    path: root.stateDir + "/hotkey-hints-bindings.json"
     watchChanges: false
     atomicWrites: true
     printErrors: false
@@ -332,22 +485,33 @@ Item {
     function dismiss(): string { root.dismiss(); return "ok" }
     function state(): string { return root.opened ? "open" : "closed" }
     function ping(): string { return "ok" }
-    // Called only by hotkey-watcher.py, and only for an `identity` it already
-    // matched against bindingsFile — so this never records anything but a
-    // real, currently-bound hotkey combo. A no-op while the setting is off,
-    // so flipping it back on later doesn't need to "catch up" on anything
-    // missed (nothing was missed — it's just not recorded until enabled).
+    // A manual test hook. In normal operation usage counts arrive on the
+    // helper's stdout instead (handleWatcherLine), where the identity has
+    // already been matched against bindingsFile, so nothing but a real,
+    // currently-bound hotkey combo is ever recorded. A no-op while the setting
+    // is off, so flipping it back on later doesn't need to "catch up" on
+    // anything missed (nothing was missed — it's just not recorded until on).
     function used(identity: string): string {
       if (root.rememberUsage) root.bumpUsage(identity)
       return "ok"
     }
     function resetUsage(): string { root.resetUsage(); return "ok" }
+    // Lets Widget.qml's settings popup tell the user whether the helper is
+    // actually running, and retry it after they fix a permission problem.
+    function status(): string { return root.watcherStatus }
+    function retry(): string { root.retryWatcher(); return root.watcherStatus }
   }
 
   Component.onCompleted: {
-    fetchKeybindings()
-    shellConfigFile.reload()
-    usageFile.reload()
+    ensureStateDirProc.running = true
+    // Defer a turn so the mkdir above has landed before the first write, and
+    // so bindingsFile.path is resolved before the helper is handed it.
+    Qt.callLater(function() {
+      root.fetchKeybindings()
+      shellConfigFile.reload()
+      usageFile.reload()
+      root.startWatcher()
+    })
   }
 
   // A card-sized layer surface. Anchored top-left with pixel margins so it
@@ -362,7 +526,7 @@ Item {
     implicitHeight: root.cardH
     color: "transparent"
     exclusionMode: ExclusionMode.Ignore
-    WlrLayershell.namespace: "t480-hotkey-hints"
+    WlrLayershell.namespace: "justarieldotcom-hotkey-hints"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 

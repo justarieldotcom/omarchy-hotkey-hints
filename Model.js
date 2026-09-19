@@ -1,4 +1,4 @@
-// Pure parsing logic for t480.hotkey-hints. No QML/Quickshell imports here —
+// Pure parsing logic for justarieldotcom.hotkey-hints. No QML/Quickshell imports here —
 // keep parsing/grouping testable in isolation, mirroring the sibling
 // control-station plugin's Model.js convention.
 .pragma library
@@ -283,8 +283,8 @@ function selfCheck() {
   console.assert(withShift.branches.length === 1 && withShift.branches[0].mod === "Alt",
     "SUPER+SHIFT should branch into Alt, got " + JSON.stringify(withShift.branches))
 
-  var cfg = { bar: { layout: { right: [{ id: "other.plugin", x: 1 }, { id: "t480.hotkey-hints", fontSize: 15, position: "top" }] } } }
-  var picked = pickBarEntrySettings(cfg, "t480.hotkey-hints")
+  var cfg = { bar: { layout: { right: [{ id: "other.plugin", x: 1 }, { id: "justarieldotcom.hotkey-hints", fontSize: 15, position: "top" }] } } }
+  var picked = pickBarEntrySettings(cfg, "justarieldotcom.hotkey-hints")
   console.assert(picked.fontSize === 15 && picked.position === "top" && picked.id === undefined,
     "pickBarEntrySettings should return this plugin's own fields, minus id")
   console.assert(Object.keys(pickBarEntrySettings(cfg, "missing.plugin")).length === 0,

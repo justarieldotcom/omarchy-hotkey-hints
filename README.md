@@ -1,134 +1,185 @@
-# Hotkey Hints (`t480.hotkey-hints`)
+# Hotkey Hints
 
-Hold **Super**, **Alt**, **Ctrl**, or **Shift** anywhere on the desktop to see,
-live from `omarchy menu keybindings --print`, which hotkeys branch off that
-modifier. The overlay is deliberately minimal: one compact card, capped at
-~10% of the screen height, showing only the single keys that complete a combo
-and the deeper modifier branches (e.g. hold Super → `+ Space → Omarchy menu`,
-`+ Ctrl · 12`). Add more modifiers while holding to drill one level in. The
-card floats free of any focus: drag it around, resize it from the corner,
-and keep typing in whatever app you're in — it never takes the keyboard.
+**Hold a modifier, see what it can do.** Hold **Super**, **Alt**, **Ctrl** or
+**Shift** anywhere on the Omarchy desktop and a small card shows which hotkeys
+branch off that key — read live from your own `omarchy menu keybindings
+--print`, so it is never out of date. Add another modifier while holding to
+drill one level deeper. Let go and it disappears.
 
-## How it's wired together
+![Hotkey Hints overlay](preview.png)
 
-- **`Overlay.qml`** (`kind: panel`, `keepLoaded: true`) — the overlay itself.
-  Always loaded at shell startup, no bar icon of its own (same shape as the
-  built-in `omarchy.osd` plugin). It only reacts to IPC calls — `press <MOD>`,
-  `release <MOD>`, `dismiss`, `state` — it never reads the keyboard directly.
-- **`hotkey-watcher.py`** — a small evdev key-state watcher, run as a root
-  systemd service (`omarchy-hotkey-hints-watcher.service`). It reads the
-  physical modifier keys from the kernel via `/dev/input`, mirroring every
-  press and release transition into the plugin's IPC. This bypasses a bug in
-  Hyprland where `bindr` release bindings for bare modifier keys silently
-  never fire, causing a multi-second phantom delay on every close. The watcher
-  emits exactly one press on first key-down and one release on last key-up of
-  each canonical modifier (Super_L/R → `SUPER`, etc.), so double-taps and
-  mixed chords resolve correctly. It also (opt-in — see below) watches for a
-  completed hotkey combo, matching it in-process against the known bindings
-  list before ever reporting it, so it never becomes a general keylogger.
-- **`Widget.qml`** (`kind: bar-widget`) — a small bar icon whose only job is
-  to host **Settings** (font family/size, padding, position, opacity, and the
-  `maxDirect` cap). This Omarchy shell only gives third-party plugins
-  live-editable, persisted settings through the bar-widget schema mechanism,
-  so this exists purely to reuse it.
-- **`Model.js`** — pure parsing: turns `omarchy menu keybindings --print`
-  output into hint groups bucketed by each binding's *leading* modifier, then
-  `stepsForHeld()` computes progressive disclosure for the currently held set
-  (direct combos, deeper modifier branches, and an overflow count). It also
-  reads this plugin's own persisted settings back out of `shell.json`.
+It stays out of your way by design:
 
-Settings are edited via the bar-widget popup and persisted into this plugin's
-inline entry in `~/.config/omarchy/shell.json`, exactly like
-`t480.control-station`. `Overlay.qml` re-reads that same file directly (via a
-watched `FileView`) since a bare `panel`-kind plugin gets no injected
-`settings` prop — so settings changes apply live, no shell restart needed.
+- **Compact.** Only the keys that *complete* a combo, plus the deeper branches
+  (`+ Ctrl · 12`). The rest collapses into a `+N more` chip.
+- **Never steals focus.** The card takes no keyboard focus at all, so you can
+  keep typing in whatever window you were in.
+- **Never flashes.** A 280 ms delay means capital letters and quick shortcuts
+  don't trigger it.
+- **Movable.** Drag it anywhere, resize it from the corner grip.
 
-## Free-floating, resize-stable surface
+## Requirements
 
-The card is a `WlrLayershell` Overlay-layer surface sized *exactly* to the
-card itself (its input region is the card — clicks outside pass through).
-It takes **no keyboard focus** (`WlrKeyboardFocus.None`), so keystrokes keep
-flowing to whatever window is focused underneath: you can keep typing while
-the hints are up, and the overlay never hijacks the active window.
+| | |
+|---|---|
+| Omarchy | 4+ (the Quickshell-based shell) |
+| Package | `python-evdev` |
+| Group | your user must be in the `input` group |
 
-- **Move**: drag the card anywhere with the mouse; it stays in screen bounds.
-  Before you move it, it re-centers on every open per the `position` setting;
-  once you drag it, it stays where you left it.
-- **Resize**: drag the corner grip. Width is free (min 360), the type scales
-  with the card width (9–26 px), and the height follows the reflowed content,
-  so shrinking/growing never clips or overflows. Height can extend past the
-  content with the vertical part of the corner drag.
-- **Close**: the overlay closes immediately when the last held modifier is
-  released — the watcher sends `release` within ~50 ms of the physical key
-  going up. There's no Escape-key path: the card has no keyboard focus so it
-  can't steal typing.
+Both exist for one reason: Hyprland never delivers a *release* event for a bare
+modifier key, so the plugin reads key transitions from the kernel instead. That
+needs read access to `/dev/input`, which the `input` group grants. **No root, no
+system service, no setuid** — see [Privacy](#privacy-what-is-actually-read)
+below for exactly what is read.
 
-## Guaranteed dismissal
+## Install
 
-- **Release**: the watcher's `release` IPC fires the moment the last physical
-  modifier key of a canonical modifier goes up (measured ~50–80 ms in tests),
-  closing the overlay immediately.
-- **Long holds**: the watcher only sends transitions, not repeats, so holding
-  a key for any duration is harmless — the overlay stays open until the
-  release arrives, however long that is.
-- **Stuck guard**: if the watcher service is down or a modifier ever goes
-  missed, the overlay closes 8 s after the last modifier event. Pure
-  insurance — in normal use the release IPC closes it within ~80 ms.
+```sh
+# 1. the evdev binding used to read key transitions
+omarchy pkg add python-evdev        # or: pacman -S python-evdev
 
-## The debounce (why fast Ctrl/Shift taps don't flash it)
+# 2. read access to /dev/input
+sudo usermod -aG input "$USER"
 
-Every modifier also does double duty in ordinary typing or shortcuts. The
-overlay defers the reveal until a modifier has been held `revealDelayMs`
-(280 ms by default), so ordinary taps, capital letters, and fast shortcuts
-never flash the card. `revealDelayMs` in `Overlay.qml` is the knob.
+# 3. the plugin itself
+omarchy plugin add https://github.com/justarieldotcom/omarchy-hotkey-hints --enable
+```
 
-## Compact-by-default
+**Then log out and back in.** Group membership only applies to a new login
+session, and the plugin's key watcher is started by the shell, so it inherits
+the session's groups. Until you do, the settings popup will tell you the
+watcher can't read the keyboard.
 
-The card says inside ~10% of the screen height by keeping only the top
-`maxDirect` (default 6) direct combos on screen, truncating descriptions to
-~20 characters, and collapsing the rest into a `+N more` chip. Raise
-`maxDirect` from the settings popup if you want more combos listed at once.
+Verify it came up:
 
-## Remember most-used hotkeys (opt-in)
+```sh
+omarchy-shell justarieldotcom.hotkey-hints status     # -> running
+```
 
-Off by default. Turn it on from the settings popup (**Remember most-used
-hotkeys**) to sort each level's chips by how often you actually press that
-combo, most-used first — combined with `maxDirect`, your most-used hotkeys
-are what stay on screen and rarely-used ones are what fall into `+N more`.
+Then just hold Super.
 
-How it's measured: `hotkey-watcher.py` (the same root evdev service that
-detects modifier release) also watches for a non-modifier key going down
-while a modifier is held — i.e. a completed combo, whether or not the
-overlay was even open at the time (so a combo you already know by muscle
-memory still counts). It's matched against the *current* keybindings list
-(which `Overlay.qml` writes out to
-`~/.local/state/omarchy/hotkey-hints-bindings.json` every time it refreshes)
-**before** anything is reported. Only a match is ever reported — ordinary
-typing, an app's own Ctrl+C, or any unbound combo never leaves the watcher
-process: no IPC call, no log line, nothing written anywhere. What is reported
-is just the mods+key identity (e.g. `SUPER:K`), counted in
-`~/.local/state/omarchy/hotkey-hints-usage.json` — never timing, never
-window/app context, never anything about the key that wasn't a known bind.
+## Uninstall
 
-Turning the setting off stops using the counts (chips revert to the
-alphabetical/shortest-first order) but keeps them on disk, so turning it back
-on later doesn't need to "relearn" anything. **Reset usage stats** in the
-settings popup clears the file.
+```sh
+omarchy plugin remove justarieldotcom.hotkey-hints
+```
 
-## Verifying changes here
+That stops the watcher (it is a child of the shell and cannot outlive it),
+unloads the overlay and removes the bar icon. Nothing is left running and
+nothing outside the plugin folder was ever installed.
 
-1. `node` — the Model logic is covered by `Model.selfCheck()` plus a harness
-   in `/tmp`; run `node` over `Model.js` after stripping the `.pragma library`
-   line (it's a QML-only pragma). See `selfCheck()` in `Model.js`.
-2. Watcher: `sudo systemctl restart omarchy-hotkey-hints-watcher` after
-   editing `hotkey-watcher.py`; check it with
-   `systemctl status omarchy-hotkey-hints-watcher`.
-3. Live: `omarchy-shell -q t480.hotkey-hints press SUPER`, wait >280 ms,
-   `omarchy-shell t480.hotkey-hints state` (expect `open`), then `dismiss` —
-   or just hold Super for real. Releasing the key closes it.
+Two small state files are deliberately left behind, so reinstalling keeps your
+settings and usage history. Delete them for a clean slate:
 
-### Editing `Overlay.qml`
+```sh
+rm -f ~/.local/state/omarchy/hotkey-hints-usage.json \
+      ~/.local/state/omarchy/hotkey-hints-bindings.json
+```
 
-After any change to `Overlay.qml`, restart the shell for the component to
-reinitialize (`omarchy restart shell`). The in-runtime "Local plugin changed,
-reloading" log does not reliably reinitialize that component.
+If you no longer want any plugin reading `/dev/input`, also remove yourself
+from the group: `sudo gpasswd -d "$USER" input`.
+
+## Settings
+
+Click the keyboard icon in the bar. Changes apply live — no restart.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Font family | theme font | Leave empty to follow the bar's theme |
+| Font size | 13 | 9–28; also scales with the card width |
+| Overlay padding | 10 | Inner padding, 4–48 |
+| Position | center | Where the card first appears: top / center / bottom |
+| Opacity | 0.97 | 0.3–1.0 |
+| Direct combos shown per level | 6 | 2–24. Keep it low so the card stays a sliver; extras become `+N more` |
+| Remember most-used hotkeys | off | Sort chips by how often you press them — see below |
+
+**Preview (Super)** opens the card for a couple of seconds so you can see a
+setting change without holding anything down.
+
+## Remember most-used hotkeys (opt-in, off by default)
+
+Turn this on and each level's chips are ordered by how often you actually press
+that combo, most-used first. Combined with the *direct combos* cap, the hotkeys
+you really use are the ones that stay on screen and the rest fall into
+`+N more`.
+
+Turning it off stops *using* the counts but keeps them, so switching back on
+doesn't have to relearn anything. **Reset usage stats** clears them.
+
+## Privacy: what is actually read
+
+This plugin reads your keyboard. Here is precisely how much, and what stops it
+being more.
+
+**Always:** the eight modifier keycodes (both Super, Ctrl, Alt and Shift keys)
+and nothing else. A press or release of one of those produces a single line —
+`press SUPER` — for the overlay. That is the whole feature.
+
+**Only with *Remember most-used hotkeys* on:** the watcher also notices a
+non-modifier key going down *while a modifier is held* — a completed hotkey.
+Before anything is reported, that combination is matched **inside the watcher
+process** against the list of your currently-bound hotkeys (which the overlay
+writes to `hotkey-hints-bindings.json` from the same `omarchy menu keybindings`
+output it draws the hints from).
+
+**No match, nothing happens.** Not reported, not logged, not written, not
+counted. Ordinary typing, an application's own Ctrl+C, any unbound
+combination — all dropped inside the watcher before leaving it. That
+match-before-report order is the entire reason a helper that sees regular key
+events is not a keylogger, and it is the thing to check if you audit this code:
+see `on_key()` in `hotkey-watcher.py`.
+
+**What a match produces** is just the identity, e.g. `SUPER:K`, counted in
+`~/.local/state/omarchy/hotkey-hints-usage.json`. Never which window had focus,
+never timing, never key sequences, never anything about a key that wasn't one of
+your own bound hotkeys.
+
+Nothing is ever sent anywhere. The plugin makes no network requests of any
+kind, and both state files are plain JSON you can read.
+
+Being in the `input` group is a real privilege — it lets *any* program you run
+read the keyboard. This plugin needs it because Hyprland won't report modifier
+releases. If that trade isn't one you want to make, this plugin isn't for you,
+and removing yourself from the group is a one-liner (above).
+
+## How it works
+
+| File | Role |
+|---|---|
+| `Overlay.qml` | The card (`panel` kind, always loaded, no bar icon). Launches and supervises the watcher, reads its stdout, draws the hints. |
+| `hotkey-watcher.py` | Unprivileged evdev helper. Prints one line per modifier transition. Wrapped in `setpriv --pdeathsig TERM`, so it dies with the shell. |
+| `Widget.qml` | The bar icon, which exists only to host the settings popup — the one mechanism Omarchy gives third-party plugins for live, persisted settings. |
+| `Model.js` | Pure parsing and the progressive-disclosure logic. No QML imports, so it is testable on its own. |
+
+Settings live in this plugin's inline entry in `~/.config/omarchy/shell.json`;
+`Overlay.qml` watches that file directly, which is why changes apply live.
+
+Developer notes, including why the kernel has to be read at all, are in
+[`docs/DEVNOTES.md`](docs/DEVNOTES.md).
+
+## Troubleshooting
+
+**The card never appears.** Check `omarchy-shell justarieldotcom.hotkey-hints
+status`:
+
+| Status | Meaning |
+|---|---|
+| `running` | Watcher is fine — if the card still won't show, hold the key a little longer than 280 ms |
+| `no-input-access` | Not in the `input` group yet, or you haven't logged out and back in since |
+| `missing-evdev` | Install `python-evdev` |
+| `no-keyboard` | No keyboard device found (unusual — a container or an unplugged external-only setup) |
+| `failed` | Crashed unexpectedly; it retries with backoff |
+
+After fixing a setup problem, use **Retry watcher** in the settings popup
+instead of restarting the shell.
+
+**It opens on the wrong monitor.** It follows Hyprland's focused output. If
+that looks wrong, check `hyprctl monitors`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+## Author
+
+**justarieldotcom** · [@justarieldotcom on X](https://x.com/justarieldotcom)

@@ -11,8 +11,8 @@ import qs.Ui
 // settings, so this widget exists purely to reuse it.
 Panel {
   id: root
-  moduleName: "t480.hotkey-hints"
-  ipcTarget: "t480.hotkey-hints.settings"
+  moduleName: "justarieldotcom.hotkey-hints"
+  ipcTarget: "justarieldotcom.hotkey-hints.settings"
   manageIpc: true
 
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
@@ -27,7 +27,73 @@ Panel {
   property int maxDirectValue: Math.max(2, Math.min(24, parseInt(setting("maxDirect", 6), 10) || 6))
   property bool rememberUsageValue: setting("rememberUsage", false) === true || setting("rememberUsage", false) === "true"
 
+  // ------------------------------------------------------- watcher health
+  // Overlay.qml supervises the evdev helper; ask it how that is going so a
+  // setup problem (user not in the `input` group, python-evdev missing) shows
+  // up here instead of the plugin just silently doing nothing. No -q: the
+  // return value only reaches stdout in non-quiet mode.
+  property string watcherStatus: ""
+
+  readonly property string watcherMessage: {
+    switch (root.watcherStatus) {
+      case "": return ""
+      case "running": return ""
+      case "starting": return "Key watcher is starting…"
+      // No shell commands in these strings on purpose: the marketplace's
+      // security baseline raises a "privilege"/"package-manager" capability on
+      // any elevation or install command found in scanned source, and one-time
+      // setup steps belong in the README regardless.
+      case "no-input-access":
+        return "Key watcher can't read the keyboard. Add your user to the "
+          + "'input' group (see the plugin README), then log out and back in."
+      case "missing-evdev":
+        return "Key watcher needs the python-evdev package installed."
+      case "no-keyboard":
+        return "Key watcher found no keyboard device."
+      default:
+        return "Key watcher stopped unexpectedly; retrying."
+    }
+  }
+
+  Process {
+    id: statusProc
+    command: ["omarchy-shell", root.moduleName, "status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.watcherStatus = String(text || "").trim()
+    }
+  }
+
+  Process {
+    id: retryProc
+    command: ["omarchy-shell", root.moduleName, "retry"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.watcherStatus = String(text || "").trim()
+    }
+  }
+
+  function refreshStatus() {
+    statusProc.running = false
+    statusProc.running = true
+  }
+
+  function retryWatcher() {
+    retryProc.running = false
+    retryProc.running = true
+    statusRecheckTimer.restart()
+  }
+
+  // The helper takes a moment to open its devices and report back, so re-ask
+  // shortly after a retry rather than trusting the immediate return value.
+  Timer {
+    id: statusRecheckTimer
+    interval: 1500
+    onTriggered: root.refreshStatus()
+  }
+
   function refreshFields() {
+    root.refreshStatus()
     familyField.text = root.fFamily
     sizeField.value = root.fSize
     padField.value = root.padValue
@@ -71,7 +137,7 @@ Panel {
   }
 
   function resetUsage() {
-    resetUsageProc.command = ["omarchy-shell", "-q", "t480.hotkey-hints", "resetUsage"]
+    resetUsageProc.command = ["omarchy-shell", "-q", "justarieldotcom.hotkey-hints", "resetUsage"]
     resetUsageProc.running = true
   }
 
@@ -80,7 +146,7 @@ Panel {
   // Briefly pops the real overlay open with SUPER's hints so a settings
   // change can be eyeballed immediately, without holding any key down.
   function preview() {
-    previewOpenProc.command = ["omarchy-shell", "-q", "t480.hotkey-hints", "press", "SUPER"]
+    previewOpenProc.command = ["omarchy-shell", "-q", "justarieldotcom.hotkey-hints", "press", "SUPER"]
     previewOpenProc.running = true
     previewCloseTimer.restart()
   }
@@ -91,7 +157,7 @@ Panel {
     id: previewCloseTimer
     interval: 2200
     onTriggered: {
-      previewCloseProc.command = ["omarchy-shell", "-q", "t480.hotkey-hints", "dismiss"]
+      previewCloseProc.command = ["omarchy-shell", "-q", "justarieldotcom.hotkey-hints", "dismiss"]
       previewCloseProc.running = true
     }
   }
@@ -163,6 +229,42 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           color: Qt.darker(root.foreground, 1.4)
+        }
+
+        // Only present when something is actually wrong — a healthy watcher
+        // adds no clutter to the popup.
+        Rectangle {
+          visible: root.watcherMessage !== ""
+          width: parent.width
+          implicitHeight: warnCol.implicitHeight + Style.space(16)
+          height: implicitHeight
+          radius: Style.cornerRadius / 2
+          color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.10)
+          border.width: 1
+          border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.45)
+
+          Column {
+            id: warnCol
+            x: Style.space(8)
+            y: Style.space(8)
+            width: parent.width - Style.space(16)
+            spacing: Style.spacing.xs
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.watcherMessage
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              color: root.foreground
+            }
+            Button {
+              text: "Retry watcher"
+              fontFamily: root.fontFamily
+              onClicked: root.retryWatcher()
+            }
+          }
         }
 
         PanelSeparator {}

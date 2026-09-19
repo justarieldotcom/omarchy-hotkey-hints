@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "t480.hotkey-hints",
+  "id": "justarieldotcom.hotkey-hints",
   "name": "Hotkey Hints",
-  "version": "1.1.0",
-  "author": "t480",
+  "version": "2.0.0",
+  "author": "justarieldotcom",
   "license": "MIT",
-  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it \u2014 then add more modifiers to drill in. Esc or release closes.",
+  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it — then add more modifiers to drill in. Esc or release closes.",
   "kinds": [
     "panel",
     "bar-widget"
@@ -17,7 +17,7 @@
   },
   "barWidget": {
     "displayName": "Hotkey Hints",
-    "description": "Settings for the hold-a-modifier hotkey overlay (the overlay itself has no bar popup \u2014 it only appears while a modifier is held).",
+    "description": "Settings for the hold-a-modifier hotkey overlay (the overlay itself has no bar popup — it only appears while a modifier is held).",
     "category": "Info",
     "aliases": [
       "hotkey-hints",
@@ -26,6 +26,7 @@
       "which-key"
     ],
     "allowMultiple": false,
+    "defaultSection": "right",
     "defaults": {
       "fontFamily": "",
       "fontSize": 13,
