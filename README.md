@@ -15,7 +15,7 @@ keybindings, so it's never out of date.
 [![License: MIT](https://img.shields.io/badge/license-MIT-f5a97f?style=flat-square)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-c6a0f6?style=flat-square)](CONTRIBUTING.md)
 
-<img src="docs/media/demo.gif" alt="Holding Super, then adding Shift, Alt and Ctrl to drill into deeper hotkey branches, then letting go" width="860">
+<img src="docs/media/demo.gif" alt="Holding Super, then adding Shift, Alt and Ctrl to drill into deeper hotkey branches, then letting go">
 
 </div>
 
@@ -45,7 +45,7 @@ next to your work.
   and set the font, padding, position and opacity live.
 
 <p align="center">
-  <img src="docs/media/desktop.jpg" alt="Hotkey Hints card showing the Super layer on an Omarchy desktop" width="860">
+  <img src="docs/media/card-super.png" alt="Hotkey Hints card showing the Super layer">
 </p>
 
 ### Drill down
