@@ -1,22 +1,69 @@
+<div align="center">
+
 # Hotkey Hints
 
-**Hold a modifier, see what it can do.** Hold **Super**, **Alt**, **Ctrl** or
-**Shift** anywhere on the Omarchy desktop and a small card shows which hotkeys
-branch off that key — read live from your own `omarchy menu keybindings
---print`, so it is never out of date. Add another modifier while holding to
-drill one level deeper. Let go and it disappears.
+**Hold a modifier. See what it can do.**
 
-![Hotkey Hints overlay](preview.png)
+A which-key style hotkey cheatsheet for [Omarchy](https://omarchy.org): hold
+**Super**, **Alt**, **Ctrl** or **Shift** anywhere on the desktop and a small
+card shows every hotkey that branches off it. It's read live from your own
+keybindings, so it's never out of date.
 
-It stays out of your way by design:
+[![Omarchy 4+](https://img.shields.io/badge/Omarchy-4%2B-8fb0ff?style=flat-square)](https://omarchy.org)
+[![Hyprland](https://img.shields.io/badge/Hyprland-Wayland-58e1ff?style=flat-square&logo=hyprland&logoColor=white)](https://hyprland.org)
+[![Quickshell](https://img.shields.io/badge/Quickshell-QML-41cd52?style=flat-square&logo=qt&logoColor=white)](https://quickshell.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-f5a97f?style=flat-square)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-c6a0f6?style=flat-square)](CONTRIBUTING.md)
 
-- **Compact.** Only the keys that *complete* a combo, plus the deeper branches
-  (`+ Ctrl · 12`). The rest collapses into a `+N more` chip.
+<img src="docs/media/demo.gif" alt="Holding Super, then adding Shift, Alt and Ctrl to drill into deeper hotkey branches, then letting go" width="860">
+
+</div>
+
+## Why
+
+Omarchy ships with *hundreds* of hotkeys, and your own `bindings` grow on top
+of that. Nobody remembers them all, and opening a keybindings menu breaks your
+flow. Hotkey Hints answers "what does Super do again?" without you ever leaving
+the keyboard: hold the key you're already reaching for and the answer appears
+next to your work.
+
+- **Progressive disclosure.** Only the keys that *complete* a combo are shown,
+  plus the deeper branches (`+ Ctrl · 12`). Add another modifier while holding
+  to drill one level deeper. The rest collapses into a `+N more` chip.
+- **Always accurate.** Built from `omarchy menu keybindings --print`, so it
+  reflects your actual config, including your own custom bindings.
 - **Never steals focus.** The card takes no keyboard focus at all, so you can
   keep typing in whatever window you were in.
 - **Never flashes.** A 280 ms delay means capital letters and quick shortcuts
   don't trigger it.
-- **Movable.** Drag it anywhere, resize it from the corner grip.
+- **Closes the instant you let go.** Release is read from the kernel, not the
+  compositor. That's the one thing Hyprland can't tell a plugin (see
+  [How it works](#how-it-works)).
+- **Learns what you use** (optional). Your most-pressed hotkeys float to the
+  front.
+- **Movable and themable.** Drag it anywhere, resize it from the corner grip,
+  and set the font, padding, position and opacity live.
+
+<p align="center">
+  <img src="docs/media/desktop.jpg" alt="Hotkey Hints card showing the Super layer on an Omarchy desktop" width="860">
+</p>
+
+### Drill down
+
+<table>
+  <tr>
+    <td><b>Super + Shift</b><br><img src="docs/media/card-super-shift.png" alt="Super + Shift layer"></td>
+  </tr>
+  <tr>
+    <td><b>Super + Alt</b><br><img src="docs/media/card-super-alt.png" alt="Super + Alt layer"></td>
+  </tr>
+  <tr>
+    <td><b>Super + Ctrl + Shift</b><br><img src="docs/media/card-super-ctrl-shift.png" alt="Super + Ctrl + Shift layer"></td>
+  </tr>
+  <tr>
+    <td><b>Ctrl</b>: only branches, no direct combos<br><img src="docs/media/card-ctrl.png" alt="Ctrl layer"></td>
+  </tr>
+</table>
 
 ## Requirements
 
@@ -175,6 +222,29 @@ instead of restarting the shell.
 
 **It opens on the wrong monitor.** It follows Hyprland's focused output. If
 that looks wrong, check `hyprctl monitors`.
+
+## Contributing
+
+This plugin is small, readable, and deliberately split so each piece is easy
+to hack on: pure logic in `Model.js` (testable under plain `node`), the UI in
+`Overlay.qml`, and a ~330-line Python helper. Forks and PRs are very welcome.
+
+Some ideas that would make it better:
+
+- **Search / filter** inside the card while it's open
+- **Themes that follow Omarchy's current theme** colors automatically
+- **Other keybinding sources**: the evdev watcher and `Model.js` don't care
+  where bindings come from; only the `omarchy menu keybindings` parse is
+  Omarchy-specific
+- **Leader-key / submap awareness** for Hyprland submaps
+- **Per-app hints**: show an application's own shortcuts when it's focused
+- **Tap-to-pin**: keep the card open after release for a proper read
+- **Translations** of the UI strings
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the dev setup, how to test each
+piece, and the few design rules that keep this plugin trustworthy. Found a bug
+or have an idea? [Open an issue](https://github.com/justarieldotcom/omarchy-hotkey-hints/issues/new/choose).
+If you build something cool on a fork, open a PR or tell me about it.
 
 ## License
 

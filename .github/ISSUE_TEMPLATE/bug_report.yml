@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work the way the README says it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: input
+    id: status
+    attributes:
+      label: Watcher status
+      description: Output of `omarchy-shell justarieldotcom.hotkey-hints status`
+      placeholder: running
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Plugin version (manifest.json), Omarchy version, Hyprland version
+      placeholder: "plugin 2.0.0 · Omarchy 4.x · Hyprland 0.56"
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshots or logs
+      description: A screenshot of the card helps a lot for layout bugs.
