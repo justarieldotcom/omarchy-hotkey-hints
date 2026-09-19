@@ -112,11 +112,16 @@ omarchy plugin remove justarieldotcom.hotkey-hints
 ```
 
 That stops the watcher (it is a child of the shell and cannot outlive it),
-unloads the overlay and removes the bar icon. Nothing is left running and
-nothing outside the plugin folder was ever installed.
+unloads the overlay and removes the bar icon, along with its entry in
+`~/.config/omarchy/shell.json`, which is where the settings live. A reinstall
+starts from the default settings. The plugin folder is deleted if it was
+installed from git; otherwise Omarchy moves it aside to
+`~/.config/omarchy/plugins/.justarieldotcom.hotkey-hints.bak.<timestamp>`.
+Nothing is left running and nothing outside the plugin folder was ever
+installed.
 
 Two small state files are deliberately left behind, so reinstalling keeps your
-settings and usage history. Delete them for a clean slate:
+usage history. Delete them for a clean slate:
 
 ```sh
 rm -f ~/.local/state/omarchy/hotkey-hints-usage.json \

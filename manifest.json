@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "justarieldotcom.hotkey-hints",
   "name": "Hotkey Hints",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "justarieldotcom",
   "license": "MIT",
-  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it — then add more modifiers to drill in. Esc or release closes.",
+  "description": "Hold Super, Alt, Ctrl, or Shift to see which hotkeys branch off it — then add more modifiers to drill in. Closes the moment you let go.",
   "kinds": [
     "panel",
     "bar-widget"

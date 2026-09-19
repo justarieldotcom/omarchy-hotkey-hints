@@ -22,7 +22,7 @@ body:
     attributes:
       label: Versions
       description: Plugin version (manifest.json), Omarchy version, Hyprland version
-      placeholder: "plugin 2.0.0 · Omarchy 4.x · Hyprland 0.56"
+      placeholder: "plugin 2.0.1 · Omarchy 4.x · Hyprland 0.56"
   - type: textarea
     id: extra
     attributes:

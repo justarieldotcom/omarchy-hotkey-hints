@@ -225,7 +225,7 @@ Panel {
           textFormat: Text.PlainText
           width: parent.width
           wrapMode: Text.WordWrap
-          text: "Hold a modifier (Super, Ctrl, Alt, Shift) to see the hotkeys that branch off it, then add more modifiers to drill in. Press Esc or release to close."
+          text: "Hold a modifier (Super, Ctrl, Alt, Shift) to see the hotkeys that branch off it, then add more modifiers to drill in. Let go to close."
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           color: Qt.darker(root.foreground, 1.4)
