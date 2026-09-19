@@ -1,3 +1,7 @@
 *.bak
 *.log
 __pycache__/
+
+# Local working files, not plugin content
+CLAUDE.md
+SUBMISSION.md
