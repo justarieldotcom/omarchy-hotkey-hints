@@ -280,6 +280,7 @@ supervises `wl-paste --watch`
 ### Wire protocol
 
 ```
+ready                once at startup, after at least one keyboard is open
 press <MOD>          SUPER | ALT | CTRL | SHIFT
 release <MOD>
 used <MODS>:<KEY>    only for an identity matched against the allowlist
@@ -299,6 +300,13 @@ now reports *why* it gave up and the overlay stops retrying (`watcherBlocked`)
 rather than respawning a doomed process on a timer; `Widget.qml` surfaces the
 reason in the settings popup with a **Retry watcher** button. `status()` over
 IPC exposes the same state for scripting.
+
+Once at least one keyboard is open the helper prints `ready`, which flips the
+status to `running`. Before that line existed, the status stayed `starting`
+until the first modifier press, so a healthy watcher looked stuck after every
+shell restart. `ready` deliberately doesn't reset the restart back-off; only
+real `press`/`used` traffic does, so a helper that crashes right after `ready`
+still backs off instead of respawning in a tight loop.
 
 ### Bugs found and fixed while doing this
 

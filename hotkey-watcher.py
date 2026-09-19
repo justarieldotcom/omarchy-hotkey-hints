@@ -289,6 +289,11 @@ if not opened:
     tell("error no-input-access" if denied else "error no-keyboard")
     sys.exit(1)
 
+# At least one keyboard is open, so we are watching. Say so now, rather than
+# leaving the plugin to infer health from the first key the user happens to
+# press.
+tell("ready")
+
 last_scan = time.monotonic()
 while not stopping:
     # Build the fd -> (path, device) map fresh each pass, skipping any device

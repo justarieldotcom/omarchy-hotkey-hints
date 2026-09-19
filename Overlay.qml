@@ -160,6 +160,7 @@ Item {
   // Only these exact shapes are acted on. The helper is the one component that
   // sees raw key data, so its output is parsed strictly rather than trusted:
   // anything not matching is dropped without reaching press()/bumpUsage().
+  readonly property var reReady: /^ready$/
   readonly property var reMod: /^(press|release) (SUPER|ALT|CTRL|SHIFT)$/
   readonly property var reUsed: /^used ((?:SUPER|ALT|CTRL|SHIFT)(?:\+(?:SUPER|ALT|CTRL|SHIFT))*:[A-Z0-9_ ]+)$/
   readonly property var reError: /^error (no-input-access|no-keyboard|missing-evdev)$/
@@ -167,6 +168,14 @@ Item {
   function handleWatcherLine(rawLine) {
     var line = String(rawLine || "").trim()
     if (line === "") return
+
+    // Keyboards opened. Deliberately leaves watcherRetries alone: a helper
+    // that says ready and then crashes must still back off, so only real key
+    // traffic proves it healthy enough to reset the counter.
+    if (root.reReady.test(line)) {
+      root.watcherStatus = "running"
+      return
+    }
 
     var m = root.reMod.exec(line)
     if (m) {
