@@ -14,7 +14,7 @@ Investigation (all on Hyprland 0.56.2):
 
 - The original design bound all 8 bare modifier keys (`Super_L/R`, `Alt_L/R`,
   `Control_L/R`, `Shift_L/R`) in `~/.config/hypr/bindings.lua`:
-  - press: `omarchy-shell -q t480.hotkey-hints press <MOD>` with
+  - press: `omarchy-shell -q justarieldotcom.hotkey-hints press <MOD>` with
     `{ repeating = true }` (acts as a keepalive while held),
   - release: `... release <MOD>` with `{ release = true }`.
 - Empirically, **the release bind never fires.** Instrumenting the plugin over
@@ -40,14 +40,14 @@ Investigation (all on Hyprland 0.56.2):
 
 `hotkey-watcher.py` bypasses the compositor's broken modifier handling
 entirely. It reads the **physical** keyboard state from `/dev/input` via
-`python-evdev` (root service) and mirrors every modifier transition into the
-plugin's existing IPC:
+`python-evdev` and reports every modifier transition on stdout, one line per
+event, to the `Overlay.qml` process that launched it:
 
 - Tracks the 8 evdev modifier keycodes (KEY_LEFTMETA/RIGHTMETA/LEFTCTRL/
   RIGHTCTRL/LEFTALT/RIGHTALT/LEFTSHIFT/RIGHTSHIFT).
 - Canonicalizes modifiers: `Super_L` or `Super_R` → `SUPER`, etc.
-- Emits exactly one `press` IPC on the first key-down of a canonical modifier
-  and one `release` IPC when the **last** of its two keys goes up — so
+- Emits exactly one `press` line on the first key-down of a canonical
+  modifier and one `release` line when the **last** of its two keys goes up — so
   tap-Super_R while holding Super_L resolves correctly.
 - Watches the raw `EV_KEY` transitions, which are never subject to the
   compositor's key-repeat dropping; press/release reach the shell in tens of
@@ -93,10 +93,11 @@ Options considered:
 - **Real completed-hotkey tracking** (chosen): extend the watcher to also
   watch non-modifier keydowns while a modifier is held.
 
-The risk with the chosen option is obvious: a root service reading
-*all* keys, not just modifiers, is a meaningfully bigger privilege surface —
-in the worst case, a keylogger. The mitigation is a strict match-before-report
-split:
+The risk with the chosen option is obvious: a helper reading *all* keys, not
+just modifiers, is a meaningfully bigger surface — in the worst case, a
+keylogger. (It no longer runs as root — see the de-rooting section below — but
+group `input` still means "can read the keyboard", so the argument stands.) The
+mitigation is a strict match-before-report split:
 - `Overlay.qml` writes every known binding (from the same
   `omarchy menu keybindings --print` parse used for the hints themselves) to
   `~/.local/state/omarchy/hotkey-hints-bindings.json` as a flat list of
@@ -104,12 +105,11 @@ split:
 - The watcher loads that file (poll-on-keydown, mtime-checked, same
   no-inotify style as the rest of the file) into an in-memory set.
 - A non-modifier keydown while a modifier is held is looked up in that set
-  **before** anything happens. No match → nothing happens: no subprocess, no
-  IPC call, no write, no log line. Only a match spawns
-  `omarchy-shell -q t480.hotkey-hints used <identity>` — the exact same
-  `subprocess.run` shape the existing press/release calls already use, so it
-  doesn't change the watcher's process-spawn profile in kind, only rate (and
-  only for real hotkey presses, which are inherently infrequent).
+  **before** anything happens. No match → nothing happens: nothing printed,
+  nothing written, no log line. Only a match prints one
+  `used <identity>` line on the same stdout the press/release lines already use,
+  so it adds no new channel at all — just an occasional extra line, and only
+  for real hotkey presses, which are inherently infrequent.
 - What's reported is only the mods+key identity string (e.g. `SUPER:K`) —
   never which window/app had focus, never timing, never anything for a key
   that didn't match a real bind.
@@ -145,42 +145,32 @@ only ever applies to keyboard-originated combos.
 
 ## Architecture / files
 
-- `Overlay.qml` — the overlay (panel plugin). Only reacts to IPC calls
-  (`press`, `release`, `dismiss`, `state`, `ping`); never reads the keyboard.
+- `Overlay.qml` — the overlay (panel plugin). Launches and supervises
+  `hotkey-watcher.py`, and acts only on validated lines from its stdout (plus
+  the IPC surface kept for testing). Never interprets the keyboard itself.
   `revealDelayMs: 280` debounces fast modifier taps; `stuckCloseMs: 8000` is
   now pure insurance.
 - `hotkey-watcher.py` — the evdev watcher described above.
-- `omarchy-hotkey-hints-watcher.service` — install unit for the watcher
-  (adjust the `ExecStart` path for your setup).
 - `Model.js` — keybinding parsing + progressive disclosure (`selfCheck()`).
 - `Widget.qml` — bar-widget used only to expose the settings popup.
 - `manifest.json` — plugin metadata / settings schema.
 
 ## Installing
 
-```sh
-# 1. Put the plugin at ~/.config/omarchy/plugins/t480.hotkey-hints
-# 2. Install the watcher as a root service
-sudo tee /etc/systemd/system/omarchy-hotkey-hints-watcher.service \
-  < omarchy-hotkey-hints-watcher.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now omarchy-hotkey-hints-watcher
-# 3. Add the service's ExecStart path to hotkey-watcher.py's real location
-#    (edit the unit so ExecStart points at your copy under ~/.config/...)
-# 4. Remove any old per-modifier binds for this plugin from your Hyprland
-#    keybindings — the watcher owns modifier press/release now.
-# 5. Restart the shell: omarchy restart shell
-```
+See the README — it is `omarchy plugin add`, the `python-evdev` package, and
+`input` group membership. There is no unit to install and no path to edit.
 
-Requirements: `python-evdev` (system package), and root for `/dev/input`.
+Removing any old per-modifier `bindr` entries for this plugin from your
+Hyprland keybindings is still worth doing if you ever had them: the watcher
+owns modifier press/release now.
 
 ## Operational notes / gotchas
 
-- The service runs as root; root must reach the user's shell IPC. The watcher
-  reconstructs `HOME`, `XDG_RUNTIME_DIR`, `OMARCHY_PATH` (and omarchy-shell
-  auto-detects the compositor socket) — tested working.
-- `sudo killall python3`-style cleanup patterns can match the watcher's own
-  command line — use `systemctl restart omarchy-hotkey-hints-watcher`.
+- The watcher is an ordinary child of the shell. To restart it after editing
+  `hotkey-watcher.py`, restart the shell (`omarchy restart shell`) — or use
+  **Retry watcher** in the settings popup, which re-spawns it in place.
+- `setpriv --pdeathsig TERM` is what guarantees the watcher cannot outlive the
+  shell. Without it, every shell restart would orphan a watcher; keep it.
 - The shell hot-reload ("Local plugin changed, reloading") does **not**
   reliably reinitialize the panel component — restart the shell after editing
   `Overlay.qml`.
@@ -193,7 +183,7 @@ Requirements: `python-evdev` (system package), and root for `/dev/input`.
 Symptom: click the bar icon, the settings popup opens fine; click anywhere
 outside it to dismiss (the normal way to close it); click the bar icon
 again — nothing happens, ever again, with no error anywhere (IPC
-`open`/`toggle`/`show` to `t480.hotkey-hints.settings` all report success,
+`open`/`toggle`/`show` to `justarieldotcom.hotkey-hints.settings` all report success,
 but no `omarchy-keyboard-panel` layer ever maps — checked with `hyprctl
 layers`).
 
@@ -231,5 +221,127 @@ happening on a bound property first — enable Qt's own diagnostic for it:
 
 - `/tmp/opencode/modtest.py` — synthetic keyboard sequence (5 s hold, tap,
   chord, double-modifier) via `UInput`; run as root.
-- Sampling loop: poll `omarchy-shell t480.hotkey-hints state` every ~50 ms to
+- Sampling loop: poll `omarchy-shell justarieldotcom.hotkey-hints state` every ~50 ms to
   timestamp open/close transitions.
+## De-rooting: from a root systemd service to a shell-owned co-process (2026-09-19)
+
+The watcher originally ran as a **root** systemd service
+(`omarchy-hotkey-hints-watcher.service`) that pushed events into the plugin by
+spawning `omarchy-shell -q <id> press SUPER` once per key transition. That
+worked on the machine it was built on and nowhere else:
+
+- the unit's `ExecStart` was an absolute `/home/<user>/...` path, hand-edited
+  per install;
+- it needed `sudo` to install, `sudo` to remove, and left a root service behind
+  if you deleted the plugin folder;
+- running as root, it had to *reconstruct* the user's session to reach the IPC
+  (`HOME`, `XDG_RUNTIME_DIR`, a hardcoded `uid = 1000` fallback);
+- it spawned a whole process per keypress.
+
+All four problems have the same root cause: the watcher was a peer of the
+shell rather than a child of it. Making it a child fixes them at once.
+
+`Overlay.qml` now launches the helper itself and reads its stdout:
+
+```qml
+Process {
+  command: ["setpriv", "--pdeathsig", "TERM", "python3", "-u",
+            root.watcherScript, bindingsFile.path]
+  stdout: SplitParser { onRead: function(line) { root.handleWatcherLine(line) } }
+  onExited: { /* exponential backoff restart, unless watcherBlocked */ }
+}
+```
+
+This is not a novel shape — it is exactly how the built-in clipboard plugin
+supervises `wl-paste --watch`
+(`$OMARCHY_PATH/shell/plugins/clipboard/Clipboard.qml`), including the
+`setpriv --pdeathsig TERM` guard. Consequences:
+
+- **No root.** Reading `/dev/input/event*` (`root:input`, mode 0660) needs
+  group `input` and nothing else. Verified empirically: as uid 1000 with only
+  supplementary group `input`, all 17 event devices open and the keyboard is
+  detected.
+- **No path to configure.** The helper's path is derived as
+  `$HOME/.config/omarchy/plugins/<plugin id>/hotkey-watcher.py`, the same
+  construction `PluginRegistry.qml` uses to discover the plugin in the first
+  place. Deliberately *not* `Qt.resolvedUrl()` → filesystem path: `Util.fileUrl()`
+  percent-encodes each segment and the shell ships no inverse helper, so that
+  round trip would be unprecedented string surgery that breaks on non-ASCII
+  usernames.
+- **No install or removal steps.** `omarchy plugin add` / `omarchy plugin
+  remove`, and `--pdeathsig TERM` means removal cannot leave a process behind.
+- **No per-keypress process spawn.** One long-lived pipe instead.
+- **The helper knows nothing about the session.** No `HOME`, no
+  `XDG_RUNTIME_DIR`, no uid guess, no `subprocess` import. It takes the
+  allowlist path in `argv[1]` and writes lines to stdout. `python3 -u` gives
+  line buffering without touching the child's environment (nothing in the shell
+  sets `Process.environment`, so its merge-vs-replace semantics are unverified).
+
+### Wire protocol
+
+```
+press <MOD>          SUPER | ALT | CTRL | SHIFT
+release <MOD>
+used <MODS>:<KEY>    only for an identity matched against the allowlist
+error <code>         no-input-access | no-keyboard | missing-evdev, then exit 1
+```
+
+Every line is matched against an anchored regex in `handleWatcherLine()` before
+anything acts on it. The helper is the one component that sees raw key data, so
+its output is parsed strictly rather than trusted; an unrecognised line is
+dropped without reaching `press()`/`bumpUsage()`.
+
+### Why the error lines exist
+
+Group membership only takes effect in a **new login session**, so the common
+first-run failure is "installed everything, still nothing happens". The helper
+now reports *why* it gave up and the overlay stops retrying (`watcherBlocked`)
+rather than respawning a doomed process on a timer; `Widget.qml` surfaces the
+reason in the settings popup with a **Retry watcher** button. `status()` over
+IPC exposes the same state for scripting.
+
+### Bugs found and fixed while doing this
+
+- **Closing an `InputDevice` sets its `.fd` to `-1`.** The old loop dropped a
+  dead device by filtering `d.fd != fd` *after* calling `close()`, so the
+  comparison was against `-1` and the device stayed in the dict. The next
+  `select()` got a `-1` and raised `ValueError` — which is not an `OSError`, so
+  the loop's `except OSError` didn't catch it and the watcher died. Under
+  `Restart=always` this was invisible; as a co-process it would have been a
+  restart loop. Devices are now dropped by **path** (`forget_device`), and the
+  fd map skips any already-closed device. Reproduced and fixed with a synthetic
+  uinput keyboard — see the test scaffold below.
+- **Media-key binds were never counted.** `KEY_NAMES` held mixed-case XF86
+  names (`"XF86AudioMute"`) while the allowlist is written by
+  `Model.usageIdentity()`, which upper-cases. So `SUPER:XF86AudioMute` was
+  compared against `SUPER:XF86AUDIOMUTE` and never matched. `KEY_NAMES` is now
+  upper-cased once at import.
+- **A keyboard vanishing mid-hold left modifiers stuck down** in the watcher's
+  `down` set, and the overlay stuck open until the 8 s guard. `forget_device()`
+  now emits `release` for anything still held when the last device goes away.
+- **The overlay could open on the wrong output.** `PanelWindow` set no
+  `screen`, so `seedPosition()`/`clampPos()` could also measure the wrong
+  output's geometry. It now resolves `Hyprland.focusedMonitor`'s name against
+  `Quickshell.screens` (the shell's own indirection, `focusedScreenName()` in
+  `plugins/bar/Bar.qml`) and assigns `panel.screen` inside
+  `revealTimer.onTriggered` **before** flipping `opened` — so the screen is only
+  ever set while the surface is unmapped. Nothing in this shell reassigns
+  `.screen` on a visible window and whether wlr-layer-shell honours that is
+  unverified, so this sidesteps the question rather than betting on it.
+- **`~/.local/state/omarchy/` may not exist on a fresh machine** and `FileView`
+  does not create parent directories. An `ensureStateDirProc` (`mkdir -p`) now
+  runs first, following `plugins/notifications/Service.qml`'s best-effort
+  pattern; `XDG_STATE_HOME` is honoured with a `$HOME/.local/state` fallback.
+
+### Testing scaffold
+
+`synth_keyboard.py` + `test_watcher.sh` (kept out of the repo; regenerate as
+needed) drive the watcher through a synthetic `uinput` keyboard while it runs
+**unprivileged** — `setpriv --reuid=1000 --regid=1000 --groups=1000,<input gid>`
+— and assert the exact expected event stream. The assertions that matter most
+are the negative ones:
+
+- an unbound combo (`SUPER+A`) produces **no** `used` line;
+- typing `Hi` with Shift held produces **no** `used` line;
+- a held `SUPER+K` autorepeating produces **exactly one** `used` line;
+- the watcher survives its keyboard being removed.
